@@ -84,6 +84,8 @@ enum LRPC_APPOUT_TCP_TYPE
     APPOUT_TCP_ACCEPT,
     // close()
     APPOUT_TCP_CLOSE,
+    // setsockopt(SOL_DEADLINE_TCP, ...)
+    APPOUT_TCP_SET_DEADLINE,
     
     APPOUT_TCP_MAX,
 };
@@ -138,6 +140,19 @@ struct appout_tcp_close_t {
     uint16_t local_port;
 } __attribute__((packed));
 static_assert(sizeof(struct appout_tcp_close_t) <= MAX_MSG_SIZE, "struct appout_tcp_close_t too large");
+
+// APPOUT_TCP_SET_DEADLINE
+struct appout_tcp_set_deadline_t {
+    opaque_ptr opaque_connection;
+    int fd;
+    /* DL_F_* in intf_ebpf.h, which of the fields below are set */
+    uint32_t mask;
+    /* absolute, CLOCK_MONOTONIC ns */
+    uint64_t deadline_ns;
+    uint64_t total_bytes;
+    uint32_t priority;
+} __attribute__((packed));
+static_assert(sizeof(struct appout_tcp_set_deadline_t) <= MAX_MSG_SIZE, "struct appout_tcp_set_deadline_t too large");
 
 /*** Kernel ------> Application ***/
 enum LRPC_APPIN_TCP_TYPE {   

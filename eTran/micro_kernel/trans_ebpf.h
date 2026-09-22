@@ -217,6 +217,10 @@ public:
     int _tcp_cc_map_fd;
     /* mapping congestion control map */
     struct bpf_cc_map_user *_tcp_cc_map_mmap;
+    /* DeadlineTCP map */
+    int _tcp_deadline_map_fd;
+    /* mapping DeadlineTCP map */
+    struct deadline_tcp_map_user *_tcp_deadline_map_mmap;
     /* Timing Wheel map */
     int _tw_outer_map_fd;   // outer map
     std::list<int> _tw_fds; // inner maps

@@ -8,6 +8,8 @@
 
 #include <eTran_posix.h>
 #include <eTran_socket.h>
+#include <deadline_tcp.h>
+#include <intf/intf_ebpf.h>
 
 extern int (*libc_socket)(int, int, int);
 extern int (*libc_close)(int sockfd);
@@ -38,6 +40,32 @@ static __thread struct eTrantcp_event events[256] = {};
 static __thread struct eTranhoma_event homa_events[256] = {};
 
 extern struct app_ctx_per_thread *eTran_get_tctx(void);
+
+static inline uint64_t monotonic_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
+/* Caller must hold socket lock */
+static int flush_deadline_params(struct eTran_socket_t *s)
+{
+    struct app_ctx_per_thread *tctx = eTran_get_tctx();
+
+    if (!s->dl_pending_mask)
+        return 0;
+
+    if (!tctx)
+        return -EIO;
+
+    if (notify_kernel_tcp_set_deadline(tctx, s->conn, s->fd, s->dl_pending_mask,
+                                       s->dl_deadline_ns, s->dl_total_bytes, s->dl_priority))
+        return -EIO;
+
+    s->dl_pending_mask = 0;
+    return 0;
+}
 
 static inline struct eTran_epoll *lookup_epoll_with_fd(int fd)
 {
@@ -720,6 +748,9 @@ int eTran_connect(int fd, const struct sockaddr *addr, socklen_t addrlen)
     s->type = SOCKET_TYPE_CONNECTION;
     s->addr = *sin;
 
+    if (flush_deadline_params(s))
+        fprintf(stderr, "eTran_connect(): failed to send DeadlineTCP parameters\n");
+
     socket_unlock(s);
 
     return 0;
@@ -1283,9 +1314,75 @@ ssize_t eTran_write(int fd, const void *buf, size_t count)
     return ret;
 }
 
+static int deadline_tcp_setsockopt(struct eTran_socket_t *s, int option_name,
+                                   const void *option_value, socklen_t option_len)
+{
+    int ret = 0;
+
+    if (s->protocol != IPPROTO_TCP)
+        return -EOPNOTSUPP;
+
+    if (!option_value)
+        return -EFAULT;
+
+    socket_lock(s);
+    switch (option_name)
+    {
+    case DTCP_DEADLINE_US:
+        if (option_len != sizeof(uint64_t))
+        {
+            ret = -EINVAL;
+            goto out;
+        }
+        /* convert to absolute time now, so control path latency does not eat into the deadline */
+        s->dl_deadline_ns = monotonic_ns() + *(const uint64_t *)option_value * 1000;
+        s->dl_pending_mask |= DL_F_DEADLINE;
+        break;
+    case DTCP_TOTAL_BYTES:
+        if (option_len != sizeof(uint64_t))
+        {
+            ret = -EINVAL;
+            goto out;
+        }
+        s->dl_total_bytes = *(const uint64_t *)option_value;
+        s->dl_pending_mask |= DL_F_SIZE;
+        break;
+    case DTCP_PRIORITY:
+        if (option_len != sizeof(uint32_t))
+        {
+            ret = -EINVAL;
+            goto out;
+        }
+        s->dl_priority = *(const uint32_t *)option_value;
+        s->dl_pending_mask |= DL_F_PRIORITY;
+        break;
+    default:
+        ret = -ENOPROTOOPT;
+        goto out;
+    }
+
+    /* not connected yet, eTran_connect() sends pending parameters */
+    if (s->type == SOCKET_TYPE_CONNECTION && s->status == S_CONN_CONNECTED)
+        ret = flush_deadline_params(s);
+    else if (s->type != SOCKET_TYPE_SOCKET)
+        ret = -ENOTCONN;
+
+out:
+    socket_unlock(s);
+    return ret;
+}
+
 int eTran_setsockopt(int socket, int level, int option_name,
                      const void *option_value, socklen_t option_len)
 {
+    if (level == SOL_DEADLINE_TCP)
+    {
+        struct eTran_socket_t *s = lookup_socket_with_fd(socket);
+        if (!s)
+            return -EBADF;
+        return deadline_tcp_setsockopt(s, option_name, option_value, option_len);
+    }
+
     if (level != SOL_SOCKET || (option_name != SO_REUSEPORT && option_name != SO_REUSEADDR))
     {
         return -EINVAL;

@@ -24,6 +24,7 @@ eTran/tcp_app/lat_client
 eTran/tcp_app/lat_server
 eTran/tcp_app/epoll_server
 eTran/tcp_app/epoll_client
+eTran/tcp_app/deadline_client
 eTran/tcp_app/flexkvs_bench
 eTran/tcp_app/flexkvs_server
 eTran/homa_app/cp_node

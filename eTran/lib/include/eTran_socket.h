@@ -64,6 +64,12 @@ struct eTran_socket_t {
 
     std::map<int, struct eTran_epoll_item *> *epoll_items;
 
+    /* DeadlineTCP parameters set before connect(), sent once connected */
+    uint32_t dl_pending_mask;
+    uint64_t dl_deadline_ns;
+    uint64_t dl_total_bytes;
+    uint32_t dl_priority;
+
     eTran_socket_t() {
         fd = 0;
         protocol = 0;
@@ -78,6 +84,10 @@ struct eTran_socket_t {
         spin_lock_init(&lock);
         kref_init(&ref);
         epoll_items = new std::map<int, struct eTran_epoll_item *>();
+        dl_pending_mask = 0;
+        dl_deadline_ns = 0;
+        dl_total_bytes = 0;
+        dl_priority = 0;
     }
     
     ~eTran_socket_t() {

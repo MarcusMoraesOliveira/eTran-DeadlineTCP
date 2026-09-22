@@ -482,6 +482,9 @@ static int reg_tcp_conn_ebpf(struct tcp_connection *c, bool listen)
     etran_tcp->_tcp_cc_map_mmap->entry[cc_idx].cnt_rx_ecn_bytes = 0;
     etran_tcp->_tcp_cc_map_mmap->entry[cc_idx].rtt_est = 0;
 
+    /* reset DeadlineTCP state, no deadline until application sets one */
+    memset(&etran_tcp->_tcp_deadline_map_mmap->entry[cc_idx], 0, sizeof(struct deadline_tcp_state));
+
     /* initialize eBPF state */
     ebpf_c.opaque_connection = OPAQUE(c->opaque_connection);
     ebpf_c.qid = c->qid;
@@ -1457,6 +1460,35 @@ int tcp_close(struct app_ctx_per_thread *tctx, struct appout_tcp_close_t *tcp_cl
     return 0;
 }
 
+int tcp_set_deadline(struct app_ctx_per_thread *tctx, struct appout_tcp_set_deadline_t *msg)
+{
+    struct tcp_connection *c = find_tcp_conn_slowpath(msg->opaque_connection);
+    if (!c || c->type != TCP_CONN_TYPE_NORMAL || c->status != CONN_OPEN || c->cc_idx >= MAX_TCP_FLOWS)
+    {
+        fprintf(stderr, "tcp_set_deadline: connection (fd %d) not found or not established\n", msg->fd);
+        return -1;
+    }
+
+    struct deadline_tcp_state *dl = &etran_tcp->_tcp_deadline_map_mmap->entry[c->cc_idx];
+
+    if (msg->mask & DL_F_DEADLINE)
+        dl->deadline_ns = msg->deadline_ns;
+    if (msg->mask & DL_F_SIZE)
+        dl->total_bytes = msg->total_bytes;
+    if (msg->mask & DL_F_PRIORITY)
+        dl->priority = msg->priority;
+    dl->flags |= msg->mask;
+
+    /* publish: eBPF reads gen to detect new parameters */
+    __atomic_store_n(&dl->gen, dl->gen + 1, __ATOMIC_RELEASE);
+
+    printf("DeadlineTCP: fd %d cc_idx %u gen %u flags 0x%x deadline_ns %lu total_bytes %lu priority %u\n",
+           msg->fd, c->cc_idx, dl->gen, dl->flags, (unsigned long)dl->deadline_ns,
+           (unsigned long)dl->total_bytes, dl->priority);
+
+    return 0;
+}
+
 void slow_path_send_tcp(struct app_ctx *actx, struct pkt_tcp *tcphdr, uint16_t len, bool to, uint32_t qid)
 {
     uint64_t buffer_addr;
@@ -1523,6 +1555,9 @@ void process_tcp_cmd(struct app_ctx_per_thread *tctx, lrpc_msg *msg_in)
     struct appout_tcp_accept_t *tcp_accept_msg_in;
     switch (msg_in->cmd)
     {
+    case APPOUT_TCP_SET_DEADLINE:
+        tcp_set_deadline(tctx, (struct appout_tcp_set_deadline_t *)msg_in->data);
+        break;
     case APPOUT_TCP_OPEN:
         tcp_open_msg_in = (struct appout_tcp_open_t *)msg_in->data;
         if (tcp_open(tctx, tcp_open_msg_in))

@@ -7,6 +7,7 @@ A_LDLIBS := -lpthread -ltcmalloc -lrt -lelf -lz
 # List of applications
 APPS := epoll_client epoll_server \
 		lat_client lat_server \
+		deadline_client \
 
 OTHER_APPS := flexkvs_server flexkvs_bench
 OTHER_APPS_OBJS := $(OTHER_APPS:=.o)
@@ -19,6 +20,8 @@ FLEXKVS_COMMON=flexkvs/utils.o flexkvs/hashtable.o flexkvs/ialloc.o flexkvs/jenk
 BENCH_COMMON=flexkvs/rng.o flexkvs/commandline.o flexkvs/workload.o
 
 all: $(APPS) $(OTHER_APPS)
+
+deadline_client.o: A_INCLUDE_DIR += -I../lib/include
 
 $(APPS): %: %.o
 	$(CXX) -o $@ $^ $(A_LDLIBS)

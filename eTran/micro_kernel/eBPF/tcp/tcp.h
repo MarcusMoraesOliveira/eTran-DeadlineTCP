@@ -66,6 +66,34 @@ struct {
     __uint(map_flags, BPF_F_MMAPABLE);
 } bpf_cc_map SEC(".maps");
 
+// DeadlineTCP per-connection state, indexed by cc_idx
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, struct deadline_tcp_state);
+    __uint(max_entries, MAX_TCP_FLOWS);
+    __uint(map_flags, BPF_F_MMAPABLE);
+} deadline_map SEC(".maps");
+
+#ifdef DEADLINE_DEBUG
+// print application parameters once each time the microkernel updates them
+static __always_inline void deadline_debug(__u32 cc_idx)
+{
+    struct deadline_tcp_state *dl = bpf_map_lookup_elem(&deadline_map, &cc_idx);
+    if (!dl)
+        return;
+    __u32 gen = *(volatile __u32 *)&dl->gen;
+    if (gen == dl->ebpf_seen_gen)
+        return;
+    dl->ebpf_seen_gen = gen;
+    bpf_printk("DeadlineTCP: cc_idx %u gen %u flags 0x%x", cc_idx, gen, dl->flags);
+    bpf_printk("DeadlineTCP: deadline_ns %llu total_bytes %llu priority %u",
+               dl->deadline_ns, dl->total_bytes, dl->priority);
+}
+#else
+static __always_inline void deadline_debug(__u32 cc_idx) {}
+#endif
+
 // ACK
 // emulate a per-cpu SCSP queue with BPF_MAP_TYPE_PERCPU_ARRAY
 struct bpf_tcp_ack {
@@ -370,6 +398,8 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
         xdp_log_panic("cc is NULL, BUG!!!");
         return XDP_DROP;
     }
+
+    deadline_debug(c->cc_idx);
 
     TCP_LOCK(c);
 

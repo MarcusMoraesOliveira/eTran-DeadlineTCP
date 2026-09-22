@@ -129,6 +129,51 @@ struct bpf_cc_map_user {
     struct bpf_cc entry[MAX_TCP_FLOWS];
 };
 
+//////////////////////////// DeadlineTCP ////////////////////////////
+/* which application-provided fields of deadline_tcp_state are valid */
+#define DL_F_DEADLINE  0x1
+#define DL_F_SIZE      0x2
+#define DL_F_PRIORITY  0x4
+
+/**
+ * Per-connection DeadlineTCP state, indexed by cc_idx (same as bpf_cc).
+ * Written by the microkernel through mmap, read (and later updated) by eBPF.
+ * The microkernel bumps gen after updating the application fields.
+ */
+struct deadline_tcp_state {
+    /* ---- set by application ---- */
+    /** absolute deadline, CLOCK_MONOTONIC ns (same clock as bpf_ktime_get_ns) */
+    __u64 deadline_ns;
+    /** total bytes of this transfer */
+    __u64 total_bytes;
+    /** priority, higher is more important */
+    __u32 priority;
+    /** DL_F_* */
+    __u32 flags;
+    /** bumped by microkernel on every application update */
+    __u32 gen;
+    /** last gen observed by eBPF */
+    __u32 ebpf_seen_gen;
+
+    /* ---- datapath state (filled by eBPF hooks) ---- */
+    __u64 start_ns;
+    __u64 bytes_sent;
+    /** Bps */
+    __u64 delivery_rate;
+    /** us */
+    __u32 srtt_us;
+    __u32 min_rtt_us;
+} __attribute__((packed, aligned(64)));
+#ifdef __cplusplus
+static_assert(sizeof(struct deadline_tcp_state) == 64, "deadline_tcp_state size is not 64 bytes");
+#else
+_Static_assert (sizeof(struct deadline_tcp_state) == 64, "deadline_tcp_state size is not 64 bytes");
+#endif
+
+struct deadline_tcp_map_user {
+    struct deadline_tcp_state entry[MAX_TCP_FLOWS];
+};
+
 // TCP fast path state
 struct bpf_tcp_conn {
 

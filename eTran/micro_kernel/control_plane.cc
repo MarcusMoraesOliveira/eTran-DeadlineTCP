@@ -1359,6 +1359,7 @@ static void process_cmd(struct app_ctx_per_thread *tctx, lrpc_msg *msg_in)
     case APPOUT_TCP_LISTEN:
     case APPOUT_TCP_ACCEPT:
     case APPOUT_TCP_CLOSE:
+    case APPOUT_TCP_SET_DEADLINE:
         process_tcp_cmd(tctx, msg_in);
         break;
     /***************** Homa *****************/

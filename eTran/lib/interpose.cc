@@ -5,7 +5,10 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 
+#include <errno.h>
+
 #include <eTran_posix.h>
+#include <deadline_tcp.h>
 
 static bool initialized = false;
 
@@ -178,7 +181,18 @@ int setsockopt(int socket, int level, int option_name,
     ensure_init();
     if (unlikely(socket < 0))
         return -EINVAL;
-    if (eTran_setsockopt(socket, level, option_name, option_value, option_len))
+    int ret = eTran_setsockopt(socket, level, option_name, option_value, option_len);
+    /* DeadlineTCP options on eTran sockets never go to libc */
+    if (level == SOL_DEADLINE_TCP && ret != -EBADF)
+    {
+        if (ret)
+        {
+            errno = -ret;
+            return -1;
+        }
+        return 0;
+    }
+    if (ret)
         return libc_setsockopt(socket, level, option_name, option_value, option_len);
     return 0;
 }

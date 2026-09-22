@@ -232,6 +232,22 @@ int eTranTCP::init_ebpf_maps(void)
         return -1;
     }
 
+    _tcp_deadline_map_fd = bpf_map__fd(bpf_object__find_map_by_name(xdp_program__bpf_obj(_ebpf.xdp_prog), "deadline_map"));
+    if (_tcp_deadline_map_fd < 0)
+    {
+        fprintf(stderr, "ERROR: bpf_map__fd failed for deadline_map\n");
+        return -1;
+    }
+
+    // mmap DeadlineTCP map
+    const size_t dl_map_sz = roundup_page(sizeof(struct deadline_tcp_map_user));
+    _tcp_deadline_map_mmap = (struct deadline_tcp_map_user *)mmap(nullptr, dl_map_sz, PROT_READ | PROT_WRITE, MAP_SHARED, _tcp_deadline_map_fd, 0);
+    if (_tcp_deadline_map_mmap == MAP_FAILED)
+    {
+        fprintf(stderr, "ERROR: mmap failed for deadline_map\n");
+        return -1;
+    }
+
     for (unsigned int i = 0; i < MAX_TCP_FLOWS; i++)
         _avail_cc_idxs.push_back(i);
 
