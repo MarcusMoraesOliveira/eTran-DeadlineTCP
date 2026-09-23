@@ -81,9 +81,33 @@ static inline void lazy_update_prev_conn_rxev(struct eTrantcp_connection *cached
     cached_conn->rxb_used += cached_rx_bump;
 }
 
+/**
+ * @brief insert a packet into rx_addrs, keeping it sorted by stream position.
+ * eTran_tcp_rx_peek_count_zc() copies packets in list order, so a packet that
+ * precedes others in the stream must also precede them in the list. Positions
+ * are relative to rxb_head (all held data lies in [rxb_head, rxb_head + rx_buf_size)).
+ * In-order packets always go to the tail, only out-of-order merges search.
+ */
+static inline void rx_addrs_insert_sorted(struct eTrantcp_connection *conn, uint64_t addr, char *pkt)
+{
+    uint32_t size = conn->rx_buf_size;
+    uint32_t head = conn->rxb_head % size;
+    uint32_t key = (rxmeta_pos(pkt) + size - head) % size;
+
+    auto it = conn->rx_addrs.end();
+    while (it != conn->rx_addrs.begin())
+    {
+        auto prev = std::prev(it);
+        if ((rxmeta_pos(prev->second) + size - head) % size <= key)
+            break;
+        it = prev;
+    }
+    conn->rx_addrs.insert(it, {addr, pkt});
+}
+
 static inline void in_order_receive(struct eTrantcp_connection *conn, uint64_t addr, char *pkt)
 {
-    conn->rx_addrs.push_back({addr, pkt});
+    rx_addrs_insert_sorted(conn, addr, pkt);
 }
 
 static inline void out_of_order_receive(struct eTrantcp_connection *conn, uint64_t addr, char *pkt)
@@ -275,10 +299,13 @@ static inline void handle_rx(struct app_ctx_per_thread *tctx, struct eTrantcp_co
         {
             ooo_bump &= ~OOO_FIN_MASK;
             *cached_rx_bump += ooo_bump; // ooo_bump has already included py_len
-            /* append ooo_rx_addrs to the tail of rx_addrs */
-            conn->rx_addrs.insert(conn->rx_addrs.end(), conn->ooo_rx_addrs.begin(), conn->ooo_rx_addrs.end());
-            conn->ooo_rx_addrs.clear();
+            /* merge ooo_rx_addrs and this packet (which precedes them in the
+             * stream) into rx_addrs in stream order: appending this packet last
+             * made reads skip data and eventually stall */
             in_order_receive(conn, addr, pkt);
+            for (auto &p : conn->ooo_rx_addrs)
+                rx_addrs_insert_sorted(conn, p.first, p.second);
+            conn->ooo_rx_addrs.clear();
             // printf("out_of_order_receive fin: rx_bump = %ld\n", *cached_rx_bump);
         }
         else if (ooo_bump & OOO_SEGMENT_MASK)
