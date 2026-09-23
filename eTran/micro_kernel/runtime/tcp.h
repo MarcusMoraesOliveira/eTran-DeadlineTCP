@@ -49,6 +49,16 @@ const unsigned int MAX_NR_CONN = 65536;
 const uint16_t TCP_SYN_RETRY = 3;
 /* How many RTTs */
 const uint64_t CC_INTERVAL_RTT = 2;
+
+/* DeadlineTCP (Phase 4) */
+/* urgent (slack < 0): pace this much above R_available, so a flow that is behind can
+ * discover capacity its own delivery rate does not show yet (1.0 = never above R_available) */
+#define DL_PROBE_GAIN 1.25
+/* moderate (0 <= slack < RTT): margin over R_required */
+#define DL_MODERATE_GAIN 1.25
+/* normal (slack >= RTT): 1 = pace at least at R_target, 0 = plain congestion control
+ * (the plan's rule, which lets a flow in slow start waste its slack) */
+#define DL_NORMAL_FLOOR 1
 const uint64_t CC_INTERVAL_US = 200;
 
 /** Type of timeout */

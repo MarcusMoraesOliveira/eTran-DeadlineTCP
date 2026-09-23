@@ -60,6 +60,7 @@ extern int unrecord_port(struct app_ctx *actx, uint16_t port);
 extern void timely_cc(struct tcp_connection *c, struct bpf_cc_snapshot *cc, uint64_t curr_tsc);
 extern void dctcp_wnd_cc(struct tcp_connection *c, struct bpf_cc_snapshot *cc, uint64_t curr_tsc);
 extern void dctcp_rate_cc(struct tcp_connection *c, struct bpf_cc_snapshot *cc, uint64_t curr_tsc);
+extern void deadline_cc(struct tcp_connection *c, struct deadline_tcp_state *dl, uint64_t now_ns);
 
 // APPIN_TCP_EVENT_NEWCONN
 void notify_app_tcp_event_newconn(struct app_ctx_per_thread *tctx, opaque_ptr l, int fd, uint32_t remote_ip, uint16_t remote_port);
@@ -454,11 +455,13 @@ static void print_deadline_stats(struct tcp_connection *c, uint32_t cc_idx)
 
     printf("DeadlineTCP stats: cc_idx %u port %u duration_us %lu bytes_sent %lu bytes_acked %lu retx_bytes %lu "
            "tx_pkts %u acks %u srtt_us %u min_rtt_us %u rtt_samples %u delivery_rate_Mbps %.1f "
-           "r_cwnd_Mbps %.1f r_bw_Mbps %.1f r_available_Mbps %.1f\n",
+           "r_cwnd_Mbps %.1f r_bw_Mbps %.1f r_available_Mbps %.1f "
+           "mode %u policy_runs %u urgent_runs %u moderate_runs %u pacing_max_Mbps %.1f\n",
            cc_idx, c->local_port, (unsigned long)((monotonic_ns() - dl->start_ns) / 1000),
            (unsigned long)dl->bytes_sent, (unsigned long)dl->bytes_acked, (unsigned long)dl->retx_bytes,
            dl->tx_pkts, dl->acks, dl->srtt_us, dl->min_rtt_us, dl->rtt_samples,
-           dl->delivery_rate * 8 / 1e6, dl->r_cwnd * 8 / 1e6, dl->r_bw * 8 / 1e6, dl->r_available * 8 / 1e6);
+           dl->delivery_rate * 8 / 1e6, dl->r_cwnd * 8 / 1e6, dl->r_bw * 8 / 1e6, dl->r_available * 8 / 1e6,
+           dl->mode, dl->policy_runs, dl->urgent_runs, dl->moderate_runs, dl->pacing_max * 8 / 1e6);
 }
 
 static void unreg_tcp_conn_ebpf(struct tcp_connection *c)
@@ -1092,18 +1095,16 @@ void poll_tcp_cc_to(void)
 
         /* run congestion control algorithm */
         if (c->algorithm == CC_TIMELY)
-        {
             timely_cc(c, &stats, curr_tsc);
-            set_cc_rate(c->cc_idx, c->cc_rate);
-        }
         else if (c->algorithm == CC_DCTCP_WND)
-        {
             dctcp_wnd_cc(c, &stats, curr_tsc);
-            set_cc_rate(c->cc_idx, c->cc_rate);
-        }
         else if (c->algorithm == CC_DCTCP_RATE)
-        {
             dctcp_rate_cc(c, &stats, curr_tsc);
+
+        if (c->algorithm != CC_NONE)
+        {
+            /* DeadlineTCP adjusts the rate chosen by congestion control */
+            deadline_cc(c, &etran_tcp->_tcp_deadline_map_mmap->entry[c->cc_idx], monotonic_ns());
             set_cc_rate(c->cc_idx, c->cc_rate);
         }
 
@@ -1513,6 +1514,13 @@ int tcp_set_deadline(struct app_ctx_per_thread *tctx, struct appout_tcp_set_dead
 
     /* publish: eBPF reads gen to detect new parameters */
     __atomic_store_n(&dl->gen, dl->gen + 1, __ATOMIC_RELEASE);
+
+    /* apply right away: a short flow must not wait for the next CC interval in slow start */
+    if (c->algorithm != CC_NONE)
+    {
+        deadline_cc(c, dl, monotonic_ns());
+        set_cc_rate(c->cc_idx, c->cc_rate);
+    }
 
     printf("DeadlineTCP: fd %d cc_idx %u gen %u flags 0x%x deadline_ns %lu total_bytes %lu priority %u\n",
            msg->fd, c->cc_idx, dl->gen, dl->flags, (unsigned long)dl->deadline_ns,

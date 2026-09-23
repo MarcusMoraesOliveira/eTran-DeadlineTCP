@@ -1,4 +1,7 @@
 #include <stdint.h>
+#include <math.h>
+
+#include <algorithm>
 
 #include <intf/intf_ebpf.h>
 #include <runtime/tcp.h>
@@ -370,4 +373,95 @@ void timely_cc(struct tcp_connection *c, struct bpf_cc_snapshot *stats, uint64_t
     c->cc_rexmits = 0;
 
     // printf("RTT: %u us, rate(kbps): %u\n", new_rtt, c->cc_rate);
+}
+/**
+ * DeadlineTCP (Phase 4): adjust the pacing rate chosen by congestion control.
+ *
+ *   T_remaining = deadline - now
+ *   B_remaining = total_bytes - bytes_sent
+ *   R_required  = B_remaining / T_remaining
+ *   R_target    = min(R_required, R_available)
+ *   Slack       = T_remaining - B_remaining / R_available
+ *
+ *   slack < 0      urgent:   pace at R_available * DL_PROBE_GAIN
+ *   slack < RTT    moderate: pace at max(cc rate, min(R_available, R_required * DL_MODERATE_GAIN))
+ *   otherwise      normal congestion control, but at least R_target (DL_NORMAL_FLOOR)
+ *
+ * R_available is the measured capacity (r_bw); before the first sample the
+ * link rate is the upper bound. c->cc_rate (kbps) is updated in place; the
+ * caller writes it to bpf_cc.rate.
+ */
+void deadline_cc(struct tcp_connection *c, struct deadline_tcp_state *dl, uint64_t now_ns)
+{
+    const double link_Bps = MAX_LINK_BANDWIDTH * 1000.0 / 8; /* MAX_LINK_BANDWIDTH is kbps */
+
+    if ((dl->flags & (DL_F_DEADLINE | DL_F_SIZE)) != (DL_F_DEADLINE | DL_F_SIZE))
+    {
+        dl->mode = DL_MODE_NONE;
+        return;
+    }
+
+    dl->policy_runs++;
+
+    if (dl->bytes_sent >= dl->total_bytes)
+    {
+        dl->mode = DL_MODE_DONE;
+        dl->pacing_rate = (uint64_t)c->cc_rate * 1000 / 8;
+        return;
+    }
+
+    double cc_Bps = (double)c->cc_rate * 1000 / 8;
+    double b_rem = (double)(dl->total_bytes - dl->bytes_sent);
+    int64_t t_rem = (int64_t)(dl->deadline_ns - now_ns);
+    double r_avail = dl->r_available ? (double)dl->r_available : link_Bps;
+    double rtt_ns = (dl->srtt_us ? dl->srtt_us : c->cc_last_rtt) * 1000.0;
+
+    double r_required = t_rem > 0 ? b_rem * 1e9 / t_rem : INFINITY;
+    double r_target = std::min(r_required, r_avail);
+    double slack = t_rem - b_rem * 1e9 / r_avail;
+
+    double pacing;
+    if (slack < 0)
+    {
+        dl->mode = DL_MODE_URGENT;
+        dl->urgent_runs++;
+        pacing = r_avail * DL_PROBE_GAIN;
+    }
+    else if (slack < rtt_ns)
+    {
+        dl->mode = DL_MODE_MODERATE;
+        dl->moderate_runs++;
+        pacing = std::max(cc_Bps, std::min(r_avail, r_required * DL_MODERATE_GAIN));
+    }
+    else
+    {
+        dl->mode = DL_MODE_NORMAL;
+        pacing = cc_Bps;
+#if DL_NORMAL_FLOOR
+        /* slack assumes sending at R_available from now on; a flow still in slow
+         * start would waste it, so never pace below what the deadline needs */
+        pacing = std::max(pacing, r_target);
+#endif
+    }
+    pacing = std::min(pacing, link_Bps);
+
+    /* cwnd_target = R_target * RTT: keep the window consistent with the pacing
+     * rate so congestion control does not fall back to a tiny window */
+    double cwnd_target = r_target * rtt_ns / 1e9;
+    dl->cwnd_target = (uint32_t)std::min(cwnd_target, (double)UINT32_MAX);
+    if (dl->mode != DL_MODE_NORMAL && c->algorithm == CC_DCTCP_WND)
+    {
+        uint32_t win = std::min((uint64_t)dl->cwnd_target, (uint64_t)c->tx_buf_size);
+        if (win > c->cc_data.dctcp_wnd.window)
+            c->cc_data.dctcp_wnd.window = win;
+    }
+
+    c->cc_rate = (uint32_t)std::min(pacing * 8 / 1000, (double)UINT32_MAX);
+
+    dl->r_required = std::isinf(r_required) ? UINT64_MAX : (uint64_t)r_required;
+    dl->r_target = std::isinf(r_target) ? UINT64_MAX : (uint64_t)r_target;
+    dl->pacing_rate = (uint64_t)pacing;
+    dl->pacing_max = std::max(dl->pacing_max, dl->pacing_rate);
+    dl->slack_ns = (int64_t)slack;
+    dl->t_remaining_ns = t_rem;
 }

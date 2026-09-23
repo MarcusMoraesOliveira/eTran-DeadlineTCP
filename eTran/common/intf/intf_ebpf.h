@@ -186,23 +186,52 @@ struct deadline_tcp_state {
     __u32 acks;
 
     /* ---- capacity estimation (R_available), Bps ---- */
-    /** congestion control rate, cwnd / RTT (bpf_cc.rate) */
+    /** current bpf_cc.rate: cwnd / RTT from congestion control, or the deadline pacing rate */
     __u64 r_cwnd;
     /** windowed max of delivery rate samples (bottleneck bandwidth) */
     __u64 r_bw;
-    /** min(r_cwnd, r_bw), r_cwnd until the first r_bw sample */
+    /** R_available = r_bw, 0 until the first sample */
     __u64 r_available;
     /** windowed max filter state for r_bw: best, 2nd best, 3rd best sample */
     struct {
         __u64 t;
         __u64 v;
     } __attribute__((packed)) bw_max[3];
+
+    /* ---- deadline control (written by the microkernel each CC interval), Bps / ns ---- */
+    /** B_remaining / T_remaining, UINT64_MAX once the deadline has passed */
+    __u64 r_required;
+    /** min(R_required, R_available) */
+    __u64 r_target;
+    /** pacing rate applied to bpf_cc.rate */
+    __u64 pacing_rate;
+    /** T_remaining - B_remaining / R_available */
+    __s64 slack_ns;
+    /** deadline - now */
+    __s64 t_remaining_ns;
+    /** R_target * RTT, bytes */
+    __u32 cwnd_target;
+    /** DL_MODE_* of the last decision */
+    __u32 mode;
+    /** number of decisions, and how many were DL_MODE_URGENT / DL_MODE_MODERATE */
+    __u32 policy_runs;
+    __u16 urgent_runs;
+    __u16 moderate_runs;
+    /** highest pacing rate applied */
+    __u64 pacing_max;
 } __attribute__((packed, aligned(64)));
 #ifdef __cplusplus
-static_assert(sizeof(struct deadline_tcp_state) == 192, "deadline_tcp_state size is not 192 bytes");
+static_assert(sizeof(struct deadline_tcp_state) == 256, "deadline_tcp_state size is not 256 bytes");
 #else
-_Static_assert (sizeof(struct deadline_tcp_state) == 192, "deadline_tcp_state size is not 192 bytes");
+_Static_assert (sizeof(struct deadline_tcp_state) == 256, "deadline_tcp_state size is not 256 bytes");
 #endif
+
+/* deadline_tcp_state.mode */
+#define DL_MODE_NONE     0  /* no deadline or no size set */
+#define DL_MODE_NORMAL   1  /* slack >= RTT: normal congestion control */
+#define DL_MODE_MODERATE 2  /* 0 <= slack < RTT: pace at least at R_required, up to R_available */
+#define DL_MODE_URGENT   3  /* slack < 0: pace at R_available * probe gain */
+#define DL_MODE_DONE     4  /* all bytes sent */
 
 struct deadline_tcp_map_user {
     struct deadline_tcp_state entry[MAX_TCP_FLOWS];

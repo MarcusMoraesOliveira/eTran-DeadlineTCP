@@ -77,8 +77,11 @@ struct {
 
 /* minimum delivery rate sampling window */
 #define DL_DR_MIN_WIN_NS 100000ULL
-/* r_bw max filter window, in delivery rate sampling windows */
+/* r_bw max filter window: DL_BW_WIN_SAMPLES delivery rate sampling windows,
+ * but at least DL_BW_MIN_WIN_NS (at ~100us windows, 10 samples = 1ms let short
+ * dips through, -25% in testing) */
 #define DL_BW_WIN_SAMPLES 10
+#define DL_BW_MIN_WIN_NS 10000000ULL
 
 #ifdef DEADLINE_DEBUG
 // print application parameters once each time the microkernel updates them
@@ -206,16 +209,22 @@ static __always_inline void deadline_on_ack(struct deadline_tcp_state *dl, __u32
             /* max-filter the smoothed rate, not raw samples: with ~100us windows,
              * ACK bursts make single samples hit the link cap and the max would
              * stick there (+25% at 20 Gbps goodput) */
-            dl->r_bw = deadline_bw_max_update(dl, DL_BW_WIN_SAMPLES * win, now, dl->delivery_rate);
+            __u64 bw_win = DL_BW_WIN_SAMPLES * win;
+            if (bw_win < DL_BW_MIN_WIN_NS)
+                bw_win = DL_BW_MIN_WIN_NS;
+            dl->r_bw = deadline_bw_max_update(dl, bw_win, now, dl->delivery_rate);
             dl->dr_win_start_ns = now;
             dl->dr_win_bytes = 0;
         }
     }
     dl->last_ack_ns = now;
 
-    /* R_available: measured capacity, capped by what congestion control allows */
+    /* R_available: measured capacity. Not min(r_cwnd, r_bw): since Phase 4 the
+     * microkernel may set bpf_cc.rate above the congestion control rate, so r_cwnd
+     * is partly our own output. 0 until the first sample (microkernel then uses
+     * the link rate as upper bound). */
     dl->r_cwnd = cc_rate;
-    dl->r_available = (dl->r_bw && dl->r_bw < cc_rate) ? dl->r_bw : cc_rate;
+    dl->r_available = dl->r_bw;
 }
 
 // ACK
