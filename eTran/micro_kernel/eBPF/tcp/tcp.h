@@ -203,7 +203,10 @@ static __always_inline void deadline_on_ack(struct deadline_tcp_state *dl, __u32
             if (sample > LINK_BANDWIDTH)
                 sample = LINK_BANDWIDTH;
             dl->delivery_rate = dl->delivery_rate ? (dl->delivery_rate * 7 + sample) / 8 : sample;
-            dl->r_bw = deadline_bw_max_update(dl, DL_BW_WIN_SAMPLES * win, now, sample);
+            /* max-filter the smoothed rate, not raw samples: with ~100us windows,
+             * ACK bursts make single samples hit the link cap and the max would
+             * stick there (+25% at 20 Gbps goodput) */
+            dl->r_bw = deadline_bw_max_update(dl, DL_BW_WIN_SAMPLES * win, now, dl->delivery_rate);
             dl->dr_win_start_ns = now;
             dl->dr_win_bytes = 0;
         }
