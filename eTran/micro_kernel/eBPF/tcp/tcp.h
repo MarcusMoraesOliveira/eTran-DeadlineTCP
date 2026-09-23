@@ -199,6 +199,9 @@ static __always_inline void deadline_on_ack(struct deadline_tcp_state *dl, __u32
         __u64 elapsed = now - dl->dr_win_start_ns;
         if (elapsed >= win) {
             __u64 sample = dl->dr_win_bytes * 1000000000ULL / elapsed;
+            /* ACK compression can make a sample exceed the link */
+            if (sample > LINK_BANDWIDTH)
+                sample = LINK_BANDWIDTH;
             dl->delivery_rate = dl->delivery_rate ? (dl->delivery_rate * 7 + sample) / 8 : sample;
             dl->r_bw = deadline_bw_max_update(dl, DL_BW_WIN_SAMPLES * win, now, sample);
             dl->dr_win_start_ns = now;
@@ -552,7 +555,9 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
     /* update receving buffer space */
     if (rx_bump) {
         // if ((c->rx_avail >> TCP_WND_SCALE) == 0 && c->tx_avail == 0)
-        if (c->tx_pending == 0)
+        /* also when the advertised window was closed: without this update the
+         * peer, which has no persist timer, would wait forever */
+        if (c->tx_pending == 0 || (c->rx_avail >> TCP_WND_SCALE) == 0)
             wnd_upd = true;
         c->rx_avail += rx_bump;
         xdp_egress_log("Rxwnd is updated from %u to %u", min((c->rx_avail - rx_bump) >> TCP_WND_SCALE, 0xFFFF), c->rx_avail);
@@ -822,8 +827,6 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
 
     __u32 now = 0;
     __u64 now64 = 0;
-    __u32 rtt_sample = 0;
-    bool rtt_valid = false;
     bool drop = true;
     #ifndef ACK_COALESCING
     struct bpf_tcp_ack *ack = NULL;
@@ -885,6 +888,12 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
             
             c->tx_sent -= tx_bump;
             cc->txp = c->tx_sent > 0;
+
+            /* here, not after payload validation: a rejected payload must not hide the ACK */
+            if (likely(tx_bump)) {
+                __u32 dl_rtt = ts_ecr ? (now - ts_ecr) / 1000 - (tx_bump * 1000000) / LINK_BANDWIDTH : TCP_MAX_RTT;
+                deadline_on_ack(dl, tx_bump, dl_rtt, dl_rtt < TCP_MAX_RTT, now64, cc->rate);
+            }
 
             if (likely(tx_bump)) {
                 c->rx_dupack_cnt = 0;
@@ -995,13 +1004,8 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
                 cc->rtt_est = (cc->rtt_est * 7 + rtt) / 8;
             else
                 cc->rtt_est = rtt;
-            rtt_sample = rtt;
-            rtt_valid = true;
         }
     }
-
-    if (tcph->ack == 1 && tx_bump)
-        deadline_on_ack(dl, tx_bump, rtt_sample, rtt_valid, now64, cc->rate);
 
     /* update TCP state if we have payload */
     if (likely(payload_len)) {

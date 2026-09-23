@@ -15,7 +15,9 @@ Entries stay in the map after a connection closes, until its cc_idx is reused.
 """
 import argparse
 import csv
+import ctypes
 import json
+import mmap
 import os
 import struct
 import subprocess
@@ -35,24 +37,52 @@ CSV_FIELDS = ["time_s", "cc_idx", "bytes_sent", "bytes_acked", "retx_bytes", "sr
               "acked_Mbps", "delivery_rate_Mbps", "r_cwnd_Mbps", "r_bw_Mbps", "r_available_Mbps"]
 
 
-def to_bytes(v):
-    return bytes(int(b, 16) for b in v)
-
-
 def mbps(bps):
     return bps * 8 / 1e6
 
 
-def read_map(show_all):
-    out = subprocess.run(["bpftool", "-j", "map", "dump", "name", "deadline_map"],
-                         check=True, capture_output=True, text=True).stdout
-    rows = {}
-    for e in json.loads(out):
-        st = dict(zip(FIELDS, struct.unpack(FMT, to_bytes(e["value"]))))
-        if not st["start_ns"] or (not show_all and not st["flags"]):
-            continue
-        rows[struct.unpack("<I", to_bytes(e["key"]))[0]] = st
-    return rows
+BPF_SYSCALL = 321  # x86_64
+BPF_MAP_GET_FD_BY_ID = 14
+MAX_TCP_FLOWS = 65536
+
+
+class DeadlineMap:
+    """deadline_map is BPF_F_MMAPABLE: map it once and read it directly."""
+
+    def __init__(self):
+        out = subprocess.run(["bpftool", "-j", "map", "show", "name", "deadline_map"],
+                             check=True, capture_output=True, text=True).stdout
+        maps = json.loads(out)
+        maps = maps if isinstance(maps, list) else [maps]
+        if not maps:
+            raise SystemExit("deadline_map not found: is micro_kernel running?")
+        # the newest map belongs to the most recently started micro_kernel
+        map_id = max(m["id"] for m in maps)
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        attr = ctypes.create_string_buffer(struct.pack("<I", map_id), 128)
+        fd = libc.syscall(BPF_SYSCALL, BPF_MAP_GET_FD_BY_ID, attr, 128)
+        if fd < 0:
+            raise SystemExit(f"BPF_MAP_GET_FD_BY_ID failed: {os.strerror(ctypes.get_errno())} (run with sudo)")
+        size = struct.calcsize(FMT) * MAX_TCP_FLOWS
+        size = (size + mmap.PAGESIZE - 1) // mmap.PAGESIZE * mmap.PAGESIZE
+        self.mem = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
+        os.close(fd)
+
+    def read(self, show_all):
+        sz = struct.calcsize(FMT)
+        start_off = FIELDS.index("start_ns")  # start_ns != 0: slot used since micro_kernel start
+        start_pos = struct.calcsize(FMT[:start_off + 1])
+        rows = {}
+        for idx in range(MAX_TCP_FLOWS):
+            base = idx * sz
+            if not struct.unpack_from("<Q", self.mem, base + start_pos)[0]:
+                continue
+            st = dict(zip(FIELDS, struct.unpack_from(FMT, self.mem, base)))
+            if not show_all and not st["flags"]:
+                continue
+            rows[idx] = st
+        return rows
 
 
 def err(est, truth):
@@ -74,11 +104,12 @@ def main():
         if new:
             writer.writerow(CSV_FIELDS)
 
+    dmap = DeadlineMap()
     prev, prev_t, t0 = {}, None, time.monotonic()
     while True:
         now = time.monotonic()
         now_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-        rows = read_map(args.a)
+        rows = dmap.read(args.a)
 
         print(f"{'cc_idx':>6} {'age_s':>7} {'dl_in_ms':>9} {'sent_MB':>9} {'acked_MB':>9} {'retx':>7} "
               f"{'srtt':>5} {'minrtt':>6} {'acked_Mbps':>10} {'r_cwnd':>9} {'r_bw':>9} {'r_avail':>9} "

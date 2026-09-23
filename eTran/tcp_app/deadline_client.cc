@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <string.h>
 #include <time.h>
+#include <fcntl.h>
 
 #include <iostream>
 #include <string>
@@ -147,12 +148,34 @@ int main(int argc, char *argv[])
     uint64_t xfer_start_us = now_us();
     char *buf = (char *)calloc(1, std::max(message_bytes, (unsigned int)SHORT_RESPONSE_SIZE));
     uint64_t sent = 0;
-    while (sent < total_bytes) {
-        if (xfer(fd, buf, message_bytes, true))
+    if (stream) {
+        /* non-blocking: send whatever fits, then drain responses so the
+         * receive window never closes */
+        if (fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK)) {
+            fprintf(stderr, "fcntl O_NONBLOCK failed\n");
             return -1;
-        if (!stream && xfer(fd, buf, SHORT_RESPONSE_SIZE, false))
-            return -1;
-        sent += message_bytes;
+        }
+        char rbuf[65536];
+        while (sent < total_bytes) {
+            ssize_t ret = write(fd, buf, std::min((uint64_t)message_bytes, total_bytes - sent));
+            if (ret < 0) {
+                fprintf(stderr, "write failed: %s\n", strerror(errno));
+                return -1;
+            }
+            sent += ret;
+            while ((ret = read(fd, rbuf, sizeof(rbuf))) > 0)
+                ;
+            if (ret < 0) {
+                fprintf(stderr, "read failed: %s\n", strerror(errno));
+                return -1;
+            }
+        }
+    } else {
+        while (sent < total_bytes) {
+            if (xfer(fd, buf, message_bytes, true) || xfer(fd, buf, SHORT_RESPONSE_SIZE, false))
+                return -1;
+            sent += message_bytes;
+        }
     }
 
     uint64_t end_us = now_us();
