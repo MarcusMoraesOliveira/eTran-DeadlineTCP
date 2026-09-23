@@ -33,6 +33,7 @@ while $i < 4096
       set $sum = 0
       set $minpos = 0xffffffff
       while $n != $head
+        set $addr = *(unsigned long *)((char *)$n + 16)
         set $pkt = *(char **)((char *)$n + 24)
         set $pos = *(unsigned int *)($pkt - 20)
         set $poff = *(unsigned short *)($pkt - 16)
@@ -41,13 +42,7 @@ while $i < 4096
         if $pos < $minpos
           set $minpos = $pos
         end
-        if $pos == $c->rxb_head
-          printf "fd %d:   pkt[%d] rx_pos %u plen %u poff %u  <- at rxb_head\n", $i, $k, $pos, $plen, $poff
-        else
-          if $k < 8
-            printf "fd %d:   pkt[%d] rx_pos %u plen %u poff %u\n", $i, $k, $pos, $plen, $poff
-          end
-        end
+        printf "PKT %d %d %lu %u %u %u %u %u\n", $i, $k, $addr, $pos, $plen, $poff, $c->rxb_head, $c->rx_buf_size
         set $k = $k + 1
         set $n = $n->_M_next
       end
@@ -59,4 +54,33 @@ end
 detach
 EOF
 
-gdb -q -batch -p "$PID" -x "$CMDS" 2>&1 | grep -E "^fd |No symbol|rror" || echo "(no connected eTran sockets found)"
+OUT=$(gdb -q -batch -p "$PID" -x "$CMDS" 2>&1) || true
+echo "$OUT" | grep -E "^fd |No symbol|rror" || echo "(no connected eTran sockets found)"
+
+# check the packet list: positions must tile [rxb_head, rxb_head + rxb_used) without gaps,
+# overlaps or UMEM frames that appear twice
+echo "$OUT" | grep "^PKT " | python3 -c '
+import sys, collections
+conns = collections.defaultdict(list)
+for line in sys.stdin:
+    _, fd, k, addr, pos, plen, poff, head, size = line.split()
+    conns[fd].append((int(k), int(addr), int(pos), int(plen), int(poff), int(head), int(size)))
+for fd, pkts in conns.items():
+    head, size = pkts[0][5], pkts[0][6]
+    frames = collections.Counter(p[1] >> 12 for p in pkts)
+    dups = {a for a, n in frames.items() if n > 1}
+    print(f"fd {fd}: {len(pkts)} packets, UMEM frames used twice: {len(dups)}")
+    for p in pkts:
+        if p[1] >> 12 in dups:
+            print(f"fd {fd}:   duplicate frame pkt[{p[0]}] addr {p[1]} rx_pos {p[2]} plen {p[3]} poff {p[4]}")
+    expect, problems = head, 0
+    for k, addr, pos, plen, poff, _, _ in sorted(pkts, key=lambda p: (p[2] - head) % size):
+        if pos != expect:
+            if problems < 10:
+                kind = "gap" if (pos - expect) % size < size // 2 else "overlap"
+                print(f"fd {fd}:   {kind} at {expect}: next packet pkt[{k}] starts at {pos} (plen {plen}, poff {poff})")
+            problems += 1
+        expect = (pos + plen) % size
+    result = "OK" if not problems else f"{problems} problem(s)"
+    print(f"fd {fd}: position check: {result}")
+'
