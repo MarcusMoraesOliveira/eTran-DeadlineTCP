@@ -137,6 +137,7 @@ int main(int argc, char *argv[])
     if (!set_before_connect && set_params(fd))
         return -1;
 
+    uint64_t xfer_start_us = now_us();
     char *buf = (char *)calloc(1, std::max(message_bytes, (unsigned int)SHORT_RESPONSE_SIZE));
     uint64_t sent = 0;
     while (sent < total_bytes) {
@@ -145,10 +146,15 @@ int main(int argc, char *argv[])
         sent += message_bytes;
     }
 
-    uint64_t fct_us = now_us() - start_us;
+    uint64_t end_us = now_us();
+    uint64_t fct_us = end_us - start_us;
+    uint64_t xfer_us = end_us - xfer_start_us;
     printf("sent %lu bytes, FCT %lu us, deadline %lu us, %s (slack %ld us)\n",
            sent, fct_us, deadline_us, fct_us <= deadline_us ? "MET" : "MISSED",
            (int64_t)deadline_us - (int64_t)fct_us);
+    /* excludes connect(), comparable to delivery_rate in deadline_map */
+    printf("transfer %lu us (connect %lu us), goodput %.1f Mbps\n",
+           xfer_us, xfer_start_us - start_us, xfer_us ? sent * 8.0 / xfer_us : 0.0);
 
     free(buf);
     close(fd);
