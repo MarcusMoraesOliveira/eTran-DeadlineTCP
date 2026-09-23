@@ -1,9 +1,10 @@
 /**
- * DeadlineTCP Phase 1 test client.
+ * DeadlineTCP test client.
  *
  * Opens one connection to epoll_server, sets deadline/size/priority through
  * the DeadlineTCP API (before or after connect), then transfers total_bytes as
- * request/response rounds and reports the completion time against the deadline.
+ * request/response rounds (or back to back with -S) and reports the completion
+ * time against the deadline.
  */
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -27,6 +28,8 @@ uint64_t total_bytes = 1000000;
 uint64_t deadline_us = 10000;
 uint32_t priority = 1;
 bool set_before_connect = false;
+/* write back to back without waiting for responses (backlogged sender) */
+bool stream = false;
 
 static inline uint64_t now_us(void)
 {
@@ -71,7 +74,7 @@ static int xfer(int fd, char *buf, size_t len, bool is_write)
 int parse_args(int argc, char *argv[])
 {
     int opt;
-    while ((opt = getopt(argc, argv, "i:p:b:n:d:P:B")) != -1) {
+    while ((opt = getopt(argc, argv, "i:p:b:n:d:P:BS")) != -1) {
         switch (opt) {
             case 'i':
                 server_ip_str = optarg;
@@ -94,6 +97,9 @@ int parse_args(int argc, char *argv[])
             case 'B':
                 set_before_connect = true;
                 break;
+            case 'S':
+                stream = true;
+                break;
             default:
                 std::cout << "Usage: " << argv[0] <<
                     " [-i server_ip, default:192.168.6.1]" <<
@@ -102,7 +108,8 @@ int parse_args(int argc, char *argv[])
                     " [-n total bytes, default:1000000]" <<
                     " [-d deadline us, default:10000]" <<
                     " [-P priority, default:1]" <<
-                    " [-B set parameters before connect()]" << std::endl;
+                    " [-B set parameters before connect()]" <<
+                    " [-S stream: send back to back, do not wait for responses]" << std::endl;
                 return -1;
         }
     }
@@ -141,7 +148,9 @@ int main(int argc, char *argv[])
     char *buf = (char *)calloc(1, std::max(message_bytes, (unsigned int)SHORT_RESPONSE_SIZE));
     uint64_t sent = 0;
     while (sent < total_bytes) {
-        if (xfer(fd, buf, message_bytes, true) || xfer(fd, buf, SHORT_RESPONSE_SIZE, false))
+        if (xfer(fd, buf, message_bytes, true))
+            return -1;
+        if (!stream && xfer(fd, buf, SHORT_RESPONSE_SIZE, false))
             return -1;
         sent += message_bytes;
     }

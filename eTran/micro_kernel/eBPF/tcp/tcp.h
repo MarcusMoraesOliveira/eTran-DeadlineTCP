@@ -77,6 +77,8 @@ struct {
 
 /* minimum delivery rate sampling window */
 #define DL_DR_MIN_WIN_NS 100000ULL
+/* r_bw max filter window, in delivery rate sampling windows */
+#define DL_BW_WIN_SAMPLES 10
 
 #ifdef DEADLINE_DEBUG
 // print application parameters once each time the microkernel updates them
@@ -116,12 +118,58 @@ static __always_inline void deadline_on_tx(struct deadline_tcp_state *dl, __u32 
 }
 
 /**
+ * Windowed running max over (t, v) samples, keeping the best, 2nd best and
+ * 3rd best sample in the window (Kathleen Nichols' algorithm, as in Linux
+ * lib/win_minmax.c used by BBR).
+ * Caller must hold bpf_spin_lock (no helper calls allowed).
+ */
+static __always_inline __u64 deadline_bw_max_update(struct deadline_tcp_state *dl, __u64 win, __u64 t, __u64 v)
+{
+    if (v >= dl->bw_max[0].v || t - dl->bw_max[2].t > win) {
+        /* new best, or nothing left in the window: reset */
+        dl->bw_max[0].t = dl->bw_max[1].t = dl->bw_max[2].t = t;
+        dl->bw_max[0].v = dl->bw_max[1].v = dl->bw_max[2].v = v;
+        return v;
+    }
+
+    if (v >= dl->bw_max[1].v) {
+        dl->bw_max[1].t = dl->bw_max[2].t = t;
+        dl->bw_max[1].v = dl->bw_max[2].v = v;
+    } else if (v >= dl->bw_max[2].v) {
+        dl->bw_max[2].t = t;
+        dl->bw_max[2].v = v;
+    }
+
+    __u64 dt = t - dl->bw_max[0].t;
+    if (dt > win) {
+        /* best sample expired: promote the next ones */
+        dl->bw_max[0] = dl->bw_max[1];
+        dl->bw_max[1] = dl->bw_max[2];
+        dl->bw_max[2].t = t;
+        dl->bw_max[2].v = v;
+        if (t - dl->bw_max[0].t > win) {
+            dl->bw_max[0] = dl->bw_max[1];
+            dl->bw_max[1] = dl->bw_max[2];
+        }
+    } else if (dl->bw_max[1].t == dl->bw_max[0].t && dt > win / 4) {
+        /* a quarter of the window passed without a 2nd best: take this one */
+        dl->bw_max[1].t = dl->bw_max[2].t = t;
+        dl->bw_max[1].v = dl->bw_max[2].v = v;
+    } else if (dl->bw_max[2].t == dl->bw_max[1].t && dt > win / 2) {
+        /* half the window passed without a 3rd best: take this one */
+        dl->bw_max[2].t = t;
+        dl->bw_max[2].v = v;
+    }
+    return dl->bw_max[0].v;
+}
+
+/**
  * ACK that acknowledges acked_bytes of new data.
  * rtt_us is a valid RTT sample only if rtt_valid.
  * Caller must hold bpf_spin_lock (no helper calls allowed).
  */
 static __always_inline void deadline_on_ack(struct deadline_tcp_state *dl, __u32 acked_bytes,
-                                            __u32 rtt_us, bool rtt_valid, __u64 now)
+                                            __u32 rtt_us, bool rtt_valid, __u64 now, __u64 cc_rate)
 {
     dl->acks++;
     dl->bytes_acked += acked_bytes;
@@ -152,11 +200,16 @@ static __always_inline void deadline_on_ack(struct deadline_tcp_state *dl, __u32
         if (elapsed >= win) {
             __u64 sample = dl->dr_win_bytes * 1000000000ULL / elapsed;
             dl->delivery_rate = dl->delivery_rate ? (dl->delivery_rate * 7 + sample) / 8 : sample;
+            dl->r_bw = deadline_bw_max_update(dl, DL_BW_WIN_SAMPLES * win, now, sample);
             dl->dr_win_start_ns = now;
             dl->dr_win_bytes = 0;
         }
     }
     dl->last_ack_ns = now;
+
+    /* R_available: measured capacity, capped by what congestion control allows */
+    dl->r_cwnd = cc_rate;
+    dl->r_available = (dl->r_bw && dl->r_bw < cc_rate) ? dl->r_bw : cc_rate;
 }
 
 // ACK
@@ -948,7 +1001,7 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
     }
 
     if (tcph->ack == 1 && tx_bump)
-        deadline_on_ack(dl, tx_bump, rtt_sample, rtt_valid, now64);
+        deadline_on_ack(dl, tx_bump, rtt_sample, rtt_valid, now64, cc->rate);
 
     /* update TCP state if we have payload */
     if (likely(payload_len)) {

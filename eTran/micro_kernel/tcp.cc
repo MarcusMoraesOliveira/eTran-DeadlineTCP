@@ -453,11 +453,12 @@ static void print_deadline_stats(struct tcp_connection *c, uint32_t cc_idx)
         return;
 
     printf("DeadlineTCP stats: cc_idx %u port %u duration_us %lu bytes_sent %lu bytes_acked %lu retx_bytes %lu "
-           "tx_pkts %u acks %u srtt_us %u min_rtt_us %u rtt_samples %u delivery_rate_Mbps %.1f\n",
+           "tx_pkts %u acks %u srtt_us %u min_rtt_us %u rtt_samples %u delivery_rate_Mbps %.1f "
+           "r_cwnd_Mbps %.1f r_bw_Mbps %.1f r_available_Mbps %.1f\n",
            cc_idx, c->local_port, (unsigned long)((monotonic_ns() - dl->start_ns) / 1000),
            (unsigned long)dl->bytes_sent, (unsigned long)dl->bytes_acked, (unsigned long)dl->retx_bytes,
            dl->tx_pkts, dl->acks, dl->srtt_us, dl->min_rtt_us, dl->rtt_samples,
-           dl->delivery_rate * 8 / 1e6);
+           dl->delivery_rate * 8 / 1e6, dl->r_cwnd * 8 / 1e6, dl->r_bw * 8 / 1e6, dl->r_available * 8 / 1e6);
 }
 
 static void unreg_tcp_conn_ebpf(struct tcp_connection *c)

@@ -184,12 +184,24 @@ struct deadline_tcp_state {
     __u32 tx_pkts;
     /** ACKs that acknowledged new data */
     __u32 acks;
-    __u64 reserved;
+
+    /* ---- capacity estimation (R_available), Bps ---- */
+    /** congestion control rate, cwnd / RTT (bpf_cc.rate) */
+    __u64 r_cwnd;
+    /** windowed max of delivery rate samples (bottleneck bandwidth) */
+    __u64 r_bw;
+    /** min(r_cwnd, r_bw), r_cwnd until the first r_bw sample */
+    __u64 r_available;
+    /** windowed max filter state for r_bw: best, 2nd best, 3rd best sample */
+    struct {
+        __u64 t;
+        __u64 v;
+    } __attribute__((packed)) bw_max[3];
 } __attribute__((packed, aligned(64)));
 #ifdef __cplusplus
-static_assert(sizeof(struct deadline_tcp_state) == 128, "deadline_tcp_state size is not 128 bytes");
+static_assert(sizeof(struct deadline_tcp_state) == 192, "deadline_tcp_state size is not 192 bytes");
 #else
-_Static_assert (sizeof(struct deadline_tcp_state) == 128, "deadline_tcp_state size is not 128 bytes");
+_Static_assert (sizeof(struct deadline_tcp_state) == 192, "deadline_tcp_state size is not 192 bytes");
 #endif
 
 struct deadline_tcp_map_user {
