@@ -279,13 +279,21 @@ static inline void handle_rx(struct app_ctx_per_thread *tctx, struct eTrantcp_co
     // XDP has prepared the position in received buffer, payload offset and payload length for us
     py_len = rxmeta_plen(pkt);
     ooo_bump = rxmeta_ooo_bump(pkt);
+    /* ooo_bump is POISON_32 (all bits set) when unused: without the POISON check every
+     * packet without payload (e.g. a pure ACK) cleared the parked out-of-order segments,
+     * whose bytes eBPF still counts when the hole is filled -> reads stall on a gap */
+    if (unlikely(ooo_bump != POISON_32 && (ooo_bump & OOO_CLEAR_MASK)))
+    {
+        /* eBPF dropped its out-of-order interval: drop the parked segments too */
+        for (auto &p : conn->ooo_rx_addrs)
+            thread_bcache_prod(bc, p.first);
+        conn->ooo_rx_addrs.clear();
+        /* any payload of this packet is in order (eBPF counted it in rx_bump) */
+        ooo_bump = POISON_32;
+    }
+
     if (py_len == POISON_16)
     {
-        if (unlikely(ooo_bump & OOO_CLEAR_MASK)) {
-            /* clear out-of-order segments */
-            conn->ooo_rx_addrs.clear();
-        }
-
         thread_bcache_prod(bc, addr);
         goto out;
     }

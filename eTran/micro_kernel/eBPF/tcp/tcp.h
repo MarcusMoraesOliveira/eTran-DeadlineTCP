@@ -827,6 +827,7 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
     __u32 tx_bump = 0;
 
     bool clear_ooo = false;
+    bool ooo_seg = false;
 
     __u32 now = 0;
     __u64 now64 = 0;
@@ -964,6 +965,9 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
         }
         // mark this packet is an out-of-order segment
         data_meta->rx.ooo_bump = OOO_SEGMENT_MASK;
+        /* its bytes are now in the interval and will be counted when the hole is
+         * filled, so lib must get the packet even if nothing else needs a redirect */
+        ooo_seg = payload_len != 0;
 
         goto unlock;
     }
@@ -1063,7 +1067,7 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
 unlock:
 
     /* redirect this packet to userspace */
-    if (likely(rx_bump || tx_bump || go_back_pos || xsk_budget_avail(c)) || clear_ooo) {
+    if (likely(rx_bump || tx_bump || go_back_pos || xsk_budget_avail(c)) || clear_ooo || ooo_seg) {
         drop = false;
         
         data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
