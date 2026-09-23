@@ -434,7 +434,10 @@ static __always_inline void fill_tcp_hdr(struct iphdr *iph, struct tcphdr *tcph,
     ts_opt->ts_val = bpf_htonl(tgt_ts);
     ts_opt->ts_ecr = bpf_htonl(ts_ecr);
     
-    tcph->window = bpf_htons(rx_wnd) >> TCP_WND_SCALE;
+    /* scale first, then convert: htons() before the shift truncated rx_wnd to
+     * 16 bits and advertised 0 whenever rx_wnd was a multiple of 64KB, e.g. an
+     * empty receive buffer (same formula as the generated ACKs in main.c) */
+    tcph->window = bpf_htons(min(rx_wnd >> TCP_WND_SCALE, 0xFFFF));
     tcph->urg_ptr = 0;
 
     // Newer kernel has supported XDP_TXMD_FLAGS_CHECKSUM, ignore the overhead
