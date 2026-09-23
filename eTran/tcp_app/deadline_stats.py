@@ -50,15 +50,32 @@ class DeadlineMap:
     """deadline_map is BPF_F_MMAPABLE: map it once and read it directly."""
 
     def __init__(self):
+        self.map_id = None
+        self.mem = None
+        self.refresh()
+
+    @staticmethod
+    def newest_id():
         out = subprocess.run(["bpftool", "-j", "map", "show", "name", "deadline_map"],
                              check=True, capture_output=True, text=True).stdout
-        maps = json.loads(out)
+        maps = json.loads(out) if out.strip() else []
         maps = maps if isinstance(maps, list) else [maps]
-        if not maps:
-            raise SystemExit("deadline_map not found: is micro_kernel running?")
         # the newest map belongs to the most recently started micro_kernel
-        map_id = max(m["id"] for m in maps)
+        return max((m["id"] for m in maps), default=None)
 
+    def refresh(self):
+        """(Re)open the newest deadline_map, e.g. after micro_kernel was restarted."""
+        map_id = self.newest_id()
+        if map_id is None:
+            raise SystemExit("deadline_map not found: is micro_kernel running?")
+        if map_id == self.map_id:
+            return False
+        if self.mem is not None:
+            self.mem.close()  # also releases the old map
+        self.open(map_id)
+        return True
+
+    def open(self, map_id):
         libc = ctypes.CDLL(None, use_errno=True)
         attr = ctypes.create_string_buffer(struct.pack("<I", map_id), 128)
         fd = libc.syscall(BPF_SYSCALL, BPF_MAP_GET_FD_BY_ID, attr, 128)
@@ -68,6 +85,7 @@ class DeadlineMap:
         size = (size + mmap.PAGESIZE - 1) // mmap.PAGESIZE * mmap.PAGESIZE
         self.mem = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
         os.close(fd)
+        self.map_id = map_id
 
     def read(self, show_all):
         sz = struct.calcsize(FMT)
@@ -107,6 +125,9 @@ def main():
     dmap = DeadlineMap()
     prev, prev_t, t0 = {}, None, time.monotonic()
     while True:
+        if dmap.refresh():
+            print(f"(micro_kernel restarted: now reading deadline_map id {dmap.map_id})")
+            prev, prev_t = {}, None
         now = time.monotonic()
         now_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
         rows = dmap.read(args.a)
