@@ -156,18 +156,40 @@ struct deadline_tcp_state {
     __u32 ebpf_seen_gen;
 
     /* ---- datapath state (filled by eBPF hooks) ---- */
+    /** connection registration time, CLOCK_MONOTONIC ns (set by microkernel) */
     __u64 start_ns;
+    /** unique payload bytes sent, retransmissions excluded */
     __u64 bytes_sent;
-    /** Bps */
+    /** smoothed delivery rate, Bps */
     __u64 delivery_rate;
-    /** us */
+    /** smoothed RTT, us */
     __u32 srtt_us;
+    /** minimum RTT sample, us, 0 = no sample yet */
     __u32 min_rtt_us;
+
+    /** payload bytes cumulatively acknowledged */
+    __u64 bytes_acked;
+    /** payload bytes sent again (below snd_high_seq) */
+    __u64 retx_bytes;
+    /** time of the last ACK that acknowledged new data, ns */
+    __u64 last_ack_ns;
+    /** current delivery rate sampling window */
+    __u64 dr_win_start_ns;
+    __u64 dr_win_bytes;
+    /** highest sequence number sent so far (end of segment) */
+    __u32 snd_high_seq;
+    /** number of valid RTT samples */
+    __u32 rtt_samples;
+    /** data packets sent, including retransmissions */
+    __u32 tx_pkts;
+    /** ACKs that acknowledged new data */
+    __u32 acks;
+    __u64 reserved;
 } __attribute__((packed, aligned(64)));
 #ifdef __cplusplus
-static_assert(sizeof(struct deadline_tcp_state) == 64, "deadline_tcp_state size is not 64 bytes");
+static_assert(sizeof(struct deadline_tcp_state) == 128, "deadline_tcp_state size is not 128 bytes");
 #else
-_Static_assert (sizeof(struct deadline_tcp_state) == 64, "deadline_tcp_state size is not 64 bytes");
+_Static_assert (sizeof(struct deadline_tcp_state) == 128, "deadline_tcp_state size is not 128 bytes");
 #endif
 
 struct deadline_tcp_map_user {

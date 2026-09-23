@@ -435,6 +435,31 @@ static void send_tcp_control(struct tcp_connection *c, uint8_t flags, int ts_opt
     return;
 }
 
+static inline uint64_t monotonic_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
+/* summary of DeadlineTCP datapath state, for connections the application set parameters on */
+static void print_deadline_stats(struct tcp_connection *c, uint32_t cc_idx)
+{
+    if (cc_idx >= MAX_TCP_FLOWS)
+        return;
+
+    struct deadline_tcp_state *dl = &etran_tcp->_tcp_deadline_map_mmap->entry[cc_idx];
+    if (!dl->flags)
+        return;
+
+    printf("DeadlineTCP stats: cc_idx %u port %u duration_us %lu bytes_sent %lu bytes_acked %lu retx_bytes %lu "
+           "tx_pkts %u acks %u srtt_us %u min_rtt_us %u rtt_samples %u delivery_rate_Mbps %.1f\n",
+           cc_idx, c->local_port, (unsigned long)((monotonic_ns() - dl->start_ns) / 1000),
+           (unsigned long)dl->bytes_sent, (unsigned long)dl->bytes_acked, (unsigned long)dl->retx_bytes,
+           dl->tx_pkts, dl->acks, dl->srtt_us, dl->min_rtt_us, dl->rtt_samples,
+           dl->delivery_rate * 8 / 1e6);
+}
+
 static void unreg_tcp_conn_ebpf(struct tcp_connection *c)
 {
     struct ebpf_flow_tuple key = {0};
@@ -449,6 +474,8 @@ static void unreg_tcp_conn_ebpf(struct tcp_connection *c)
     {
         fprintf(stderr, "unreg_tcp_conn_ebpf: failed to lookup ebpf map\n");
     }
+
+    print_deadline_stats(c, ebpf_c.cc_idx);
 
     free_cc_idx(ebpf_c.cc_idx);
 
@@ -482,8 +509,6 @@ static int reg_tcp_conn_ebpf(struct tcp_connection *c, bool listen)
     etran_tcp->_tcp_cc_map_mmap->entry[cc_idx].cnt_rx_ecn_bytes = 0;
     etran_tcp->_tcp_cc_map_mmap->entry[cc_idx].rtt_est = 0;
 
-    /* reset DeadlineTCP state, no deadline until application sets one */
-    memset(&etran_tcp->_tcp_deadline_map_mmap->entry[cc_idx], 0, sizeof(struct deadline_tcp_state));
 
     /* initialize eBPF state */
     ebpf_c.opaque_connection = OPAQUE(c->opaque_connection);
@@ -514,6 +539,12 @@ static int reg_tcp_conn_ebpf(struct tcp_connection *c, bool listen)
 
     ebpf_c.cc_idx = cc_idx;
     ebpf_c.ecn_enable = c->flags & ECN_ENABLE;
+
+    /* reset DeadlineTCP state, no deadline until application sets one */
+    struct deadline_tcp_state *dl = &etran_tcp->_tcp_deadline_map_mmap->entry[cc_idx];
+    memset(dl, 0, sizeof(*dl));
+    dl->start_ns = monotonic_ns();
+    dl->snd_high_seq = ebpf_c.tx_next_seq;
 
     for (unsigned int i = 0; i < c->tctx->actx->nr_nic_queues; i++)
     {

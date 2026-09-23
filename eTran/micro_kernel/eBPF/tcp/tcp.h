@@ -75,13 +75,13 @@ struct {
     __uint(map_flags, BPF_F_MMAPABLE);
 } deadline_map SEC(".maps");
 
+/* minimum delivery rate sampling window */
+#define DL_DR_MIN_WIN_NS 100000ULL
+
 #ifdef DEADLINE_DEBUG
 // print application parameters once each time the microkernel updates them
-static __always_inline void deadline_debug(__u32 cc_idx)
+static __always_inline void deadline_debug(struct deadline_tcp_state *dl, __u32 cc_idx)
 {
-    struct deadline_tcp_state *dl = bpf_map_lookup_elem(&deadline_map, &cc_idx);
-    if (!dl)
-        return;
     __u32 gen = *(volatile __u32 *)&dl->gen;
     if (gen == dl->ebpf_seen_gen)
         return;
@@ -91,8 +91,73 @@ static __always_inline void deadline_debug(__u32 cc_idx)
                dl->deadline_ns, dl->total_bytes, dl->priority);
 }
 #else
-static __always_inline void deadline_debug(__u32 cc_idx) {}
+static __always_inline void deadline_debug(struct deadline_tcp_state *dl, __u32 cc_idx) {}
 #endif
+
+/**
+ * Data packet transmission. end_seq is the sequence number after this segment.
+ * Only bytes above the highest sequence sent so far count as bytes_sent, the
+ * rest are retransmissions.
+ * Caller must hold bpf_spin_lock (no helper calls allowed).
+ */
+static __always_inline void deadline_on_tx(struct deadline_tcp_state *dl, __u32 end_seq, __u32 payload_len)
+{
+    __s32 new_bytes = (__s32)(end_seq - dl->snd_high_seq);
+
+    dl->tx_pkts++;
+    if (new_bytes > 0) {
+        dl->bytes_sent += new_bytes;
+        dl->snd_high_seq = end_seq;
+        if ((__u32)new_bytes < payload_len)
+            dl->retx_bytes += payload_len - new_bytes;
+    } else {
+        dl->retx_bytes += payload_len;
+    }
+}
+
+/**
+ * ACK that acknowledges acked_bytes of new data.
+ * rtt_us is a valid RTT sample only if rtt_valid.
+ * Caller must hold bpf_spin_lock (no helper calls allowed).
+ */
+static __always_inline void deadline_on_ack(struct deadline_tcp_state *dl, __u32 acked_bytes,
+                                            __u32 rtt_us, bool rtt_valid, __u64 now)
+{
+    dl->acks++;
+    dl->bytes_acked += acked_bytes;
+
+    if (rtt_valid) {
+        /* keep 0 as "no sample" */
+        if (!rtt_us)
+            rtt_us = 1;
+        dl->srtt_us = dl->srtt_us ? (dl->srtt_us * 7 + rtt_us) / 8 : rtt_us;
+        if (!dl->min_rtt_us || rtt_us < dl->min_rtt_us)
+            dl->min_rtt_us = rtt_us;
+        dl->rtt_samples++;
+    }
+
+    /* delivery rate: bytes acked over a window of max(srtt, DL_DR_MIN_WIN_NS) */
+    __u64 win = (__u64)dl->srtt_us * 1000;
+    if (win < DL_DR_MIN_WIN_NS)
+        win = DL_DR_MIN_WIN_NS;
+
+    /* first ACK or connection was idle: bytes acked now were sent before the
+     * window started, so only open a new window */
+    if (!dl->dr_win_start_ns || now - dl->last_ack_ns > 4 * win) {
+        dl->dr_win_start_ns = now;
+        dl->dr_win_bytes = 0;
+    } else {
+        dl->dr_win_bytes += acked_bytes;
+        __u64 elapsed = now - dl->dr_win_start_ns;
+        if (elapsed >= win) {
+            __u64 sample = dl->dr_win_bytes * 1000000000ULL / elapsed;
+            dl->delivery_rate = dl->delivery_rate ? (dl->delivery_rate * 7 + sample) / 8 : sample;
+            dl->dr_win_start_ns = now;
+            dl->dr_win_bytes = 0;
+        }
+    }
+    dl->last_ack_ns = now;
+}
 
 // ACK
 // emulate a per-cpu SCSP queue with BPF_MAP_TYPE_PERCPU_ARRAY
@@ -399,7 +464,13 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
         return XDP_DROP;
     }
 
-    deadline_debug(c->cc_idx);
+    struct deadline_tcp_state *dl = bpf_map_lookup_elem(&deadline_map, &c->cc_idx);
+    if (unlikely(!dl)) {
+        xdp_log_panic("dl is NULL, BUG!!!");
+        return XDP_DROP;
+    }
+
+    deadline_debug(dl, c->cc_idx);
 
     TCP_LOCK(c);
 
@@ -484,6 +555,9 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
     c->tx_sent += payload_len;
     cc->txp = c->tx_sent > 0;
     c->tx_pending -= payload_len;
+
+    if (payload_len)
+        deadline_on_tx(dl, c->tx_next_seq, payload_len);
 
     // /*** NO CC ***/
     // TCP_UNLOCK(c);
@@ -694,15 +768,19 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
     bool clear_ooo = false;
 
     __u32 now = 0;
+    __u64 now64 = 0;
+    __u32 rtt_sample = 0;
+    bool rtt_valid = false;
     bool drop = true;
     #ifndef ACK_COALESCING
     struct bpf_tcp_ack *ack = NULL;
     #endif
 
     if (!rx_cached_ts[cpu])
-        now = bpf_ktime_get_ns();
+        now64 = bpf_ktime_get_ns();
     else
-        now = rx_cached_ts[cpu];
+        now64 = rx_cached_ts[cpu];
+    now = now64;
 
     /* trigger an ACK if there is payload (even if we discard it) */
     if (payload_len) {
@@ -726,6 +804,12 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
     struct bpf_cc *cc = bpf_map_lookup_elem(&bpf_cc_map, &c->cc_idx);
     if (unlikely(!cc)) {
         xdp_log_panic("cc is NULL, BUG!!!");
+        return XDP_DROP;
+    }
+
+    struct deadline_tcp_state *dl = bpf_map_lookup_elem(&deadline_map, &c->cc_idx);
+    if (unlikely(!dl)) {
+        xdp_log_panic("dl is NULL, BUG!!!");
         return XDP_DROP;
     }
 
@@ -858,8 +942,13 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
                 cc->rtt_est = (cc->rtt_est * 7 + rtt) / 8;
             else
                 cc->rtt_est = rtt;
+            rtt_sample = rtt;
+            rtt_valid = true;
         }
     }
+
+    if (tcph->ack == 1 && tx_bump)
+        deadline_on_ack(dl, tx_bump, rtt_sample, rtt_valid, now64);
 
     /* update TCP state if we have payload */
     if (likely(payload_len)) {
