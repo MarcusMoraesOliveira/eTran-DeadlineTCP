@@ -35,8 +35,9 @@ bool stream = false;
 /* transfers to run, each on a new connection */
 unsigned int repeats = 1;
 
-/* -f: concurrent flows in this process, sharing the bottleneck (one process,
- * since a second eTran application on the same micro_kernel does not connect) */
+/* -f: concurrent flows in this process, sharing the bottleneck. Separate
+ * client processes work too: the micro_kernel needs one NIC queue per
+ * application (-q >= number of applications, each with ETRAN_NR_NIC_QUEUES=1) */
 struct flow_spec {
     uint64_t deadline_us;   /* 0 = no deadline/size */
 };
