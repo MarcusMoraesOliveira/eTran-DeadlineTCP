@@ -24,21 +24,22 @@ import subprocess
 import time
 
 # struct deadline_tcp_state in common/intf/intf_ebpf.h
-FMT = "<QQIIIIQQQIIQQQQQIIIIQQQQQQQQQQQQqqIIIHHQ"
-FIELDS = ["deadline_ns", "total_bytes", "priority", "flags", "gen", "ebpf_seen_gen",
+FMT = "<QQIIIIQQQIIQQQQQIIIIQQQQQQQQQQQQqqIIIHHQII56x"
+FIELDS = ["deadline_ns", "total_bytes", "_rsvd", "flags", "gen", "ebpf_seen_gen",
           "start_ns", "bytes_sent", "delivery_rate", "srtt_us", "min_rtt_us",
           "bytes_acked", "retx_bytes", "last_ack_ns", "dr_win_start_ns", "dr_win_bytes",
           "snd_high_seq", "rtt_samples", "tx_pkts", "acks",
           "r_cwnd", "r_bw", "r_available",
           "bw_max0_t", "bw_max0_v", "bw_max1_t", "bw_max1_v", "bw_max2_t", "bw_max2_v",
           "r_required", "r_target", "pacing_rate", "slack_ns", "t_remaining_ns",
-          "cwnd_target", "mode", "policy_runs", "urgent_runs", "moderate_runs", "pacing_max"]
-assert struct.calcsize(FMT) == 256
+          "cwnd_target", "mode", "policy_runs", "urgent_runs", "moderate_runs", "pacing_max",
+          "urgency_milli", "urgent_gain_milli"]
+assert struct.calcsize(FMT) == 320
 MODES = {0: "none", 1: "normal", 2: "moderate", 3: "URGENT", 4: "done"}
 
 CSV_FIELDS = ["time_s", "cc_idx", "bytes_sent", "bytes_acked", "retx_bytes", "srtt_us", "min_rtt_us",
               "acked_Mbps", "delivery_rate_Mbps", "r_cwnd_Mbps", "r_bw_Mbps", "r_available_Mbps",
-              "mode", "r_required_Mbps", "pacing_Mbps", "slack_us"]
+              "mode", "r_required_Mbps", "pacing_Mbps", "slack_us", "urgency"]
 
 
 def mbps(bps):
@@ -138,7 +139,8 @@ def main():
 
         print(f"{'cc_idx':>6} {'age_s':>7} {'dl_in_ms':>9} {'sent_MB':>9} {'acked_MB':>9} {'retx':>7} "
               f"{'srtt':>5} {'minrtt':>6} {'acked_Mbps':>10} {'r_cwnd':>9} {'r_bw':>9} {'r_avail':>9} "
-              f"{'err_bw':>7} {'err_avail':>9} {'mode':>8} {'r_req':>9} {'pacing':>9} {'slack_ms':>9}")
+              f"{'err_bw':>7} {'err_avail':>9} {'mode':>8} {'r_req':>9} {'pacing':>9} {'slack_ms':>9} "
+              f"{'urgency':>8} {'gain':>5}")
         for idx, st in sorted(rows.items()):
             truth = 0.0
             p = prev.get(idx)
@@ -152,13 +154,14 @@ def main():
                   f"{st['srtt_us']:>5} {st['min_rtt_us']:>6} {truth if truth else float('nan'):>10.1f} "
                   f"{r_cwnd:>9.1f} {r_bw:>9.1f} {r_av:>9.1f} "
                   f"{err(r_bw, truth):>7} {err(r_av, truth):>9} {MODES.get(st['mode'], '?'):>8} "
-                  f"{req:>9.1f} {mbps(st['pacing_rate']):>9.1f} {st['slack_ns'] / 1e6:>9.2f}")
+                  f"{req:>9.1f} {mbps(st['pacing_rate']):>9.1f} {st['slack_ns'] / 1e6:>9.2f} "
+                  f"{st['urgency_milli'] / 1e3:>8.3f} {st['urgent_gain_milli'] / 1e3:>5.2f}")
             if writer and truth:
                 writer.writerow([f"{now - t0:.3f}", idx, st["bytes_sent"], st["bytes_acked"], st["retx_bytes"],
                                  st["srtt_us"], st["min_rtt_us"], f"{truth:.1f}", f"{mbps(st['delivery_rate']):.1f}",
                                  f"{r_cwnd:.1f}", f"{r_bw:.1f}", f"{r_av:.1f}",
                                  MODES.get(st["mode"], "?"), f"{req:.1f}", f"{mbps(st['pacing_rate']):.1f}",
-                                 f"{st['slack_ns'] / 1e3:.0f}"])
+                                 f"{st['slack_ns'] / 1e3:.0f}", f"{st['urgency_milli'] / 1e3:.3f}"])
         if not rows:
             print("(no connections)")
         if writer:

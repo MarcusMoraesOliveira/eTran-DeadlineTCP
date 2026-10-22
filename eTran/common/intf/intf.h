@@ -150,7 +150,6 @@ struct appout_tcp_set_deadline_t {
     /* absolute, CLOCK_MONOTONIC ns */
     uint64_t deadline_ns;
     uint64_t total_bytes;
-    uint32_t priority;
 } __attribute__((packed));
 static_assert(sizeof(struct appout_tcp_set_deadline_t) <= MAX_MSG_SIZE, "struct appout_tcp_set_deadline_t too large");
 

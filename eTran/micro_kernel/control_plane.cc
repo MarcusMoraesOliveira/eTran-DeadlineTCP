@@ -65,7 +65,6 @@ static std::unordered_map<uint16_t, bool> port_is_available;
 static pthread_t micro_kernel_thread;
 
 std::set<uint16_t> rule_dst_ports;
-std::set<uint16_t> rule_src_ports;
 
 // micro_kernel.cc
 extern class eTranNIC *etran_nic;
@@ -241,17 +240,13 @@ int record_port(struct app_ctx *actx, uint16_t local_port, uint16_t remote_port)
     std::string cmd;
     std::string res;
 
-    /* only support TCP */
-    if (!remote_port && rule_dst_ports.find(local_port) == rule_dst_ports.end()){
-        cmd = "ethtool -U " + etran_nic->_if_name + " flow-type tcp4 dst-port " + std::to_string(local_port) + " context " + std::to_string(actx->rss_ctx_id);
-        rule_dst_ports.insert(local_port);
-    }
-    else if (rule_src_ports.find(remote_port) == rule_src_ports.end()){
-        cmd = "ethtool -U " + etran_nic->_if_name + " flow-type tcp4 src-port " + std::to_string(remote_port) + " context " + std::to_string(actx->rss_ctx_id);
-        rule_src_ports.insert(remote_port);
-    }
-    if (cmd.empty())
+    /* only support TCP. Steer by local port, also for connect(): local ports are
+     * unique on this micro_kernel, while the remote port (e.g. a server port) is
+     * shared by every application that connects to it, and a rule on it would
+     * deliver all their packets to the first application's queues */
+    if (rule_dst_ports.find(local_port) != rule_dst_ports.end())
         return 0;
+    cmd = "ethtool -U " + etran_nic->_if_name + " flow-type tcp4 dst-port " + std::to_string(local_port) + " context " + std::to_string(actx->rss_ctx_id);
     exec_cmd(cmd, res);
     if (res.empty())
     {
@@ -262,7 +257,8 @@ int record_port(struct app_ctx *actx, uint16_t local_port, uint16_t remote_port)
     size_t pos = res.find("Added rule with ID ");
     if (pos != std::string::npos)
     {
-        actx->flow_director_rules.push_back({std::stoi(res.substr(pos + 19)), remote_port ? remote_port : local_port, remote_port ? true : false});
+        actx->flow_director_rules.push_back({std::stoi(res.substr(pos + 19)), local_port});
+        rule_dst_ports.insert(local_port);
     }
     else
     {
@@ -280,22 +276,36 @@ int unrecord_port(struct app_ctx *actx, uint16_t port)
     actx->ports.erase(port);
     if (actx->proto != IPPROTO_TCP)
         return 0;
-    for (auto it = actx->flow_director_rules.begin(); it != actx->flow_director_rules.end(); it++)
+    /* only the rule of this port: the application's other connections keep theirs */
+    for (auto it = actx->flow_director_rules.begin(); it != actx->flow_director_rules.end();)
     {
-        std::string cmd;
-        std::string res;
-        cmd = "ethtool -U " + etran_nic->_if_name + " delete " + std::to_string(it->id);
-        if (it->source)
-            rule_src_ports.erase(it->port);
-        else
-            rule_dst_ports.erase(it->port);
+        if (it->port != port)
+        {
+            it++;
+            continue;
+        }
+        std::string cmd = "ethtool -U " + etran_nic->_if_name + " delete " + std::to_string(it->id);
+        rule_dst_ports.erase(it->port);
+        std::cout << cmd << std::endl;
+        exec_cmd(cmd);
+        it = actx->flow_director_rules.erase(it);
+    }
+
+    return 0;
+}
+
+/* application exit: rules left behind (listeners, connections still referenced)
+ * would steer a reused local port to dead queues and keep the RSS context busy */
+static void unrecord_all_ports(struct app_ctx *actx)
+{
+    for (auto &rule : actx->flow_director_rules)
+    {
+        std::string cmd = "ethtool -U " + etran_nic->_if_name + " delete " + std::to_string(rule.id);
+        rule_dst_ports.erase(rule.port);
         std::cout << cmd << std::endl;
         exec_cmd(cmd);
     }
-
     actx->flow_director_rules.clear();
-
-    return 0;
 }
 
 static void destroy_rss_context(struct app_ctx *actx)
@@ -432,6 +442,7 @@ static void free_app_resources(struct app_ctx *actx)
         free_homa_resources(actx);
     }
 
+    unrecord_all_ports(actx);
     destroy_rss_context(actx);
 
     for (unsigned int i = 0; i < actx->nr_nic_queues; i++)

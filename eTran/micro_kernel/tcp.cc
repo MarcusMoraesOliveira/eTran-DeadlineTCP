@@ -456,12 +456,13 @@ static void print_deadline_stats(struct tcp_connection *c, uint32_t cc_idx)
     printf("DeadlineTCP stats: cc_idx %u port %u duration_us %lu bytes_sent %lu bytes_acked %lu retx_bytes %lu "
            "tx_pkts %u acks %u srtt_us %u min_rtt_us %u rtt_samples %u delivery_rate_Mbps %.1f "
            "r_cwnd_Mbps %.1f r_bw_Mbps %.1f r_available_Mbps %.1f "
-           "mode %u policy_runs %u urgent_runs %u moderate_runs %u pacing_max_Mbps %.1f\n",
+           "mode %u policy_runs %u urgent_runs %u moderate_runs %u pacing_max_Mbps %.1f urgency %.3f urgent_gain %.3f\n",
            cc_idx, c->local_port, (unsigned long)((monotonic_ns() - dl->start_ns) / 1000),
            (unsigned long)dl->bytes_sent, (unsigned long)dl->bytes_acked, (unsigned long)dl->retx_bytes,
            dl->tx_pkts, dl->acks, dl->srtt_us, dl->min_rtt_us, dl->rtt_samples,
            dl->delivery_rate * 8 / 1e6, dl->r_cwnd * 8 / 1e6, dl->r_bw * 8 / 1e6, dl->r_available * 8 / 1e6,
-           dl->mode, dl->policy_runs, dl->urgent_runs, dl->moderate_runs, dl->pacing_max * 8 / 1e6);
+           dl->mode, dl->policy_runs, dl->urgent_runs, dl->moderate_runs, dl->pacing_max * 8 / 1e6,
+           dl->urgency_milli / 1e3, dl->urgent_gain_milli / 1e3);
 }
 
 static void unreg_tcp_conn_ebpf(struct tcp_connection *c)
@@ -1508,8 +1509,6 @@ int tcp_set_deadline(struct app_ctx_per_thread *tctx, struct appout_tcp_set_dead
         dl->deadline_ns = msg->deadline_ns;
     if (msg->mask & DL_F_SIZE)
         dl->total_bytes = msg->total_bytes;
-    if (msg->mask & DL_F_PRIORITY)
-        dl->priority = msg->priority;
     dl->flags |= msg->mask;
 
     /* publish: eBPF reads gen to detect new parameters */
@@ -1522,9 +1521,9 @@ int tcp_set_deadline(struct app_ctx_per_thread *tctx, struct appout_tcp_set_dead
         set_cc_rate(c->cc_idx, c->cc_rate);
     }
 
-    printf("DeadlineTCP: fd %d cc_idx %u gen %u flags 0x%x deadline_ns %lu total_bytes %lu priority %u\n",
+    printf("DeadlineTCP: fd %d cc_idx %u gen %u flags 0x%x deadline_ns %lu total_bytes %lu\n",
            msg->fd, c->cc_idx, dl->gen, dl->flags, (unsigned long)dl->deadline_ns,
-           (unsigned long)dl->total_bytes, dl->priority);
+           (unsigned long)dl->total_bytes);
 
     return 0;
 }

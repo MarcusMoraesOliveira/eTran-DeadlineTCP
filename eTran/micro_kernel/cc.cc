@@ -383,9 +383,17 @@ void timely_cc(struct tcp_connection *c, struct bpf_cc_snapshot *stats, uint64_t
  *   R_target    = min(R_required, R_available)
  *   Slack       = T_remaining - B_remaining / R_available
  *
- *   slack < 0      urgent:   pace at R_available * DL_PROBE_GAIN
+ *   Urgency     = T_remaining / T_estimated,  T_estimated = B_remaining / R_available
+ *
+ *   urgency < 1    urgent:   pace at R_available * min(DL_URGENT_GAIN_MAX, 1 + (DL_PROBE_GAIN - 1) / urgency)
  *   slack < RTT    moderate: pace at max(cc rate, min(R_available, R_required * DL_MODERATE_GAIN))
  *   otherwise      normal congestion control, but at least R_target (DL_NORMAL_FLOOR)
+ *
+ * Only the deadline drives the policy. Urgency has no unit: 1 means the flow
+ * finishes exactly at the deadline at R_available, so urgency < 1 is the same
+ * as slack < 0, and the further behind schedule the flow is, the harder it
+ * pushes. Each flow only looks at its own deadline: competing flows are not
+ * coordinated.
  *
  * R_available is the measured capacity (r_bw); before the first sample the
  * link rate is the upper bound. c->cc_rate (kbps) is updated in place; the
@@ -418,14 +426,18 @@ void deadline_cc(struct tcp_connection *c, struct deadline_tcp_state *dl, uint64
 
     double r_required = t_rem > 0 ? b_rem * 1e9 / t_rem : INFINITY;
     double r_target = std::min(r_required, r_avail);
-    double slack = t_rem - b_rem * 1e9 / r_avail;
+    double t_est = b_rem * 1e9 / r_avail;
+    double slack = t_rem - t_est;
+    double urgency = std::max((double)t_rem, 0.0) / t_est;
+    double gain = 1;
 
     double pacing;
-    if (slack < 0)
+    if (urgency < 1)
     {
         dl->mode = DL_MODE_URGENT;
         dl->urgent_runs++;
-        pacing = r_avail * DL_PROBE_GAIN;
+        gain = urgency > 0 ? std::min(DL_URGENT_GAIN_MAX, 1 + (DL_PROBE_GAIN - 1) / urgency) : DL_URGENT_GAIN_MAX;
+        pacing = r_avail * gain;
     }
     else if (slack < rtt_ns)
     {
@@ -464,4 +476,6 @@ void deadline_cc(struct tcp_connection *c, struct deadline_tcp_state *dl, uint64
     dl->pacing_max = std::max(dl->pacing_max, dl->pacing_rate);
     dl->slack_ns = (int64_t)slack;
     dl->t_remaining_ns = t_rem;
+    dl->urgency_milli = (uint32_t)std::min(urgency * 1000, (double)UINT32_MAX);
+    dl->urgent_gain_milli = (uint32_t)(gain * 1000);
 }

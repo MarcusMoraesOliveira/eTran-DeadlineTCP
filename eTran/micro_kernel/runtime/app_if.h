@@ -41,8 +41,8 @@ struct app_ctx_per_thread
 
 struct fd_rule_t {
     int id;
+    /* local port, flow-type tcp4 dst-port */
     uint16_t port;
-    bool source;
 };
 
 // application context in kernel

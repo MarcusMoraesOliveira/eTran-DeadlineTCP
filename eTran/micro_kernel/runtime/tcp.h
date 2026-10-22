@@ -59,6 +59,10 @@ const uint64_t CC_INTERVAL_RTT = 2;
 /* normal (slack >= RTT): 1 = pace at least at R_target, 0 = plain congestion control
  * (the plan's rule, which lets a flow in slow start waste its slack) */
 #define DL_NORMAL_FLOOR 1
+
+/* urgent gain = 1 + (DL_PROBE_GAIN - 1) / urgency, capped here: the further behind
+ * schedule, the harder a flow pushes over R_available */
+#define DL_URGENT_GAIN_MAX 1.5
 const uint64_t CC_INTERVAL_US = 200;
 
 /** Type of timeout */

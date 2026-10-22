@@ -92,8 +92,8 @@ static __always_inline void deadline_debug(struct deadline_tcp_state *dl, __u32 
         return;
     dl->ebpf_seen_gen = gen;
     bpf_printk("DeadlineTCP: cc_idx %u gen %u flags 0x%x", cc_idx, gen, dl->flags);
-    bpf_printk("DeadlineTCP: deadline_ns %llu total_bytes %llu priority %u",
-               dl->deadline_ns, dl->total_bytes, dl->priority);
+    bpf_printk("DeadlineTCP: deadline_ns %llu total_bytes %llu",
+               dl->deadline_ns, dl->total_bytes);
 }
 #else
 static __always_inline void deadline_debug(struct deadline_tcp_state *dl, __u32 cc_idx) {}

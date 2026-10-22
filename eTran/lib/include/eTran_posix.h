@@ -389,7 +389,7 @@ static inline int notify_kernel_tcp_conn_close(struct app_ctx_per_thread *tctx, 
 }
 
 static inline int notify_kernel_tcp_set_deadline(struct app_ctx_per_thread *tctx, struct eTrantcp_connection *conn, int fd,
-                                                 uint32_t mask, uint64_t deadline_ns, uint64_t total_bytes, uint32_t priority)
+                                                 uint32_t mask, uint64_t deadline_ns, uint64_t total_bytes)
 {
     lrpc_msg msg;
     struct appout_tcp_set_deadline_t *dl_msg = (struct appout_tcp_set_deadline_t *)msg.data;
@@ -401,7 +401,6 @@ static inline int notify_kernel_tcp_set_deadline(struct app_ctx_per_thread *tctx
     dl_msg->mask = mask;
     dl_msg->deadline_ns = deadline_ns;
     dl_msg->total_bytes = total_bytes;
-    dl_msg->priority = priority;
 
     if (lrpc_send(&tctx->app_out, &msg))
     {

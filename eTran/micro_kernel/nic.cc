@@ -153,6 +153,14 @@ int eTranNIC::create_nic(void)
         return -1;
     }
 
+    /* applications are steered to their queues with ethtool -U rules */
+    cmd = "ethtool -K " + _if_name + " ntuple on";
+    if (!exec_cmd(cmd))
+    {
+        fprintf(stderr, "Failed to enable ntuple filters\n");
+        return -1;
+    }
+
     /* set the queue length */
     cmd = "ethtool -G " + _if_name + " rx " + std::to_string(_queue_len) + " tx " + std::to_string(_queue_len);
     if (!exec_cmd(cmd))

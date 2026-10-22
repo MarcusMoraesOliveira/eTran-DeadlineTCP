@@ -60,7 +60,7 @@ static int flush_deadline_params(struct eTran_socket_t *s)
         return -EIO;
 
     if (notify_kernel_tcp_set_deadline(tctx, s->conn, s->fd, s->dl_pending_mask,
-                                       s->dl_deadline_ns, s->dl_total_bytes, s->dl_priority))
+                                       s->dl_deadline_ns, s->dl_total_bytes))
         return -EIO;
 
     s->dl_pending_mask = 0;
@@ -1346,15 +1346,6 @@ static int deadline_tcp_setsockopt(struct eTran_socket_t *s, int option_name,
         }
         s->dl_total_bytes = *(const uint64_t *)option_value;
         s->dl_pending_mask |= DL_F_SIZE;
-        break;
-    case DTCP_PRIORITY:
-        if (option_len != sizeof(uint32_t))
-        {
-            ret = -EINVAL;
-            goto out;
-        }
-        s->dl_priority = *(const uint32_t *)option_value;
-        s->dl_pending_mask |= DL_F_PRIORITY;
         break;
     default:
         ret = -ENOPROTOOPT;

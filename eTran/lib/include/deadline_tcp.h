@@ -22,8 +22,6 @@
 #define DTCP_DEADLINE_US 1
 /* uint64_t, total bytes of the transfer */
 #define DTCP_TOTAL_BYTES 2
-/* uint32_t, priority, higher is more important */
-#define DTCP_PRIORITY 3
 
 static inline int deadline_tcp_set_deadline(int sockfd, uint64_t deadline_us)
 {
@@ -33,9 +31,4 @@ static inline int deadline_tcp_set_deadline(int sockfd, uint64_t deadline_us)
 static inline int deadline_tcp_set_size(int sockfd, uint64_t total_bytes)
 {
     return setsockopt(sockfd, SOL_DEADLINE_TCP, DTCP_TOTAL_BYTES, &total_bytes, sizeof(total_bytes));
-}
-
-static inline int deadline_tcp_set_priority(int sockfd, uint32_t priority)
-{
-    return setsockopt(sockfd, SOL_DEADLINE_TCP, DTCP_PRIORITY, &priority, sizeof(priority));
 }

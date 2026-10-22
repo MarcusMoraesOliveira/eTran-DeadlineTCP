@@ -133,7 +133,6 @@ struct bpf_cc_map_user {
 /* which application-provided fields of deadline_tcp_state are valid */
 #define DL_F_DEADLINE  0x1
 #define DL_F_SIZE      0x2
-#define DL_F_PRIORITY  0x4
 
 /**
  * Per-connection DeadlineTCP state, indexed by cc_idx (same as bpf_cc).
@@ -146,8 +145,8 @@ struct deadline_tcp_state {
     __u64 deadline_ns;
     /** total bytes of this transfer */
     __u64 total_bytes;
-    /** priority, higher is more important */
-    __u32 priority;
+    /** unused, keeps the 8-byte fields below aligned */
+    __u32 _rsvd;
     /** DL_F_* */
     __u32 flags;
     /** bumped by microkernel on every application update */
@@ -219,18 +218,25 @@ struct deadline_tcp_state {
     __u16 moderate_runs;
     /** highest pacing rate applied */
     __u64 pacing_max;
+
+    /* ---- deadline urgency (written by the microkernel each CC interval) ---- */
+    /** Urgency = T_remaining / T_estimated, x1000; < 1000 = behind schedule */
+    __u32 urgency_milli;
+    /** gain over R_available applied in DL_MODE_URGENT, x1000 */
+    __u32 urgent_gain_milli;
+    __u8 _pad[56];
 } __attribute__((packed, aligned(64)));
 #ifdef __cplusplus
-static_assert(sizeof(struct deadline_tcp_state) == 256, "deadline_tcp_state size is not 256 bytes");
+static_assert(sizeof(struct deadline_tcp_state) == 320, "deadline_tcp_state size is not 320 bytes");
 #else
-_Static_assert (sizeof(struct deadline_tcp_state) == 256, "deadline_tcp_state size is not 256 bytes");
+_Static_assert (sizeof(struct deadline_tcp_state) == 320, "deadline_tcp_state size is not 320 bytes");
 #endif
 
 /* deadline_tcp_state.mode */
 #define DL_MODE_NONE     0  /* no deadline or no size set */
 #define DL_MODE_NORMAL   1  /* slack >= RTT: normal congestion control */
 #define DL_MODE_MODERATE 2  /* 0 <= slack < RTT: pace at least at R_required, up to R_available */
-#define DL_MODE_URGENT   3  /* slack < 0: pace at R_available * probe gain */
+#define DL_MODE_URGENT   3  /* urgency < 1: pace at R_available * urgent gain */
 #define DL_MODE_DONE     4  /* all bytes sent */
 
 struct deadline_tcp_map_user {

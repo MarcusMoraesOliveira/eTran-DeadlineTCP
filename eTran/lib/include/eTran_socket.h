@@ -68,7 +68,6 @@ struct eTran_socket_t {
     uint32_t dl_pending_mask;
     uint64_t dl_deadline_ns;
     uint64_t dl_total_bytes;
-    uint32_t dl_priority;
 
     eTran_socket_t() {
         fd = 0;
@@ -87,7 +86,6 @@ struct eTran_socket_t {
         dl_pending_mask = 0;
         dl_deadline_ns = 0;
         dl_total_bytes = 0;
-        dl_priority = 0;
     }
     
     ~eTran_socket_t() {

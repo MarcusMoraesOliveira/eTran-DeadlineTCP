@@ -1,7 +1,7 @@
 /**
  * DeadlineTCP test client.
  *
- * Opens one connection to epoll_server, sets deadline/size/priority through
+ * Opens one connection to epoll_server, sets deadline/size through
  * the DeadlineTCP API (before or after connect), then transfers total_bytes as
  * request/response rounds (or back to back with -S) and reports the completion
  * time against the deadline.
@@ -29,12 +29,18 @@ uint16_t server_port = 50000;
 unsigned int message_bytes = 100;
 uint64_t total_bytes = 1000000;
 uint64_t deadline_us = 10000;
-uint32_t priority = 1;
 bool set_before_connect = false;
 /* write back to back without waiting for responses (backlogged sender) */
 bool stream = false;
 /* transfers to run, each on a new connection */
 unsigned int repeats = 1;
+
+/* -f: concurrent flows in this process, sharing the bottleneck (one process,
+ * since a second eTran application on the same micro_kernel does not connect) */
+struct flow_spec {
+    uint64_t deadline_us;   /* 0 = no deadline/size */
+};
+std::vector<struct flow_spec> flows;
 
 static inline uint64_t now_us(void)
 {
@@ -43,7 +49,7 @@ static inline uint64_t now_us(void)
     return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
-static int set_params(int fd)
+static int set_params(int fd, uint64_t deadline_us)
 {
     if (deadline_tcp_set_deadline(fd, deadline_us)) {
         fprintf(stderr, "deadline_tcp_set_deadline: %s\n", strerror(errno));
@@ -53,12 +59,8 @@ static int set_params(int fd)
         fprintf(stderr, "deadline_tcp_set_size: %s\n", strerror(errno));
         return -1;
     }
-    if (deadline_tcp_set_priority(fd, priority)) {
-        fprintf(stderr, "deadline_tcp_set_priority: %s\n", strerror(errno));
-        return -1;
-    }
-    printf("set deadline_us %lu total_bytes %lu priority %u (%s connect)\n",
-           deadline_us, total_bytes, priority, set_before_connect ? "before" : "after");
+    printf("set deadline_us %lu total_bytes %lu (%s connect)\n",
+           deadline_us, total_bytes, set_before_connect ? "before" : "after");
     return 0;
 }
 
@@ -79,7 +81,7 @@ static int xfer(int fd, char *buf, size_t len, bool is_write)
 int parse_args(int argc, char *argv[])
 {
     int opt;
-    while ((opt = getopt(argc, argv, "i:p:b:n:d:P:BSr:")) != -1) {
+    while ((opt = getopt(argc, argv, "i:p:b:n:d:BSr:f:")) != -1) {
         switch (opt) {
             case 'i':
                 server_ip_str = optarg;
@@ -96,9 +98,6 @@ int parse_args(int argc, char *argv[])
             case 'd':
                 deadline_us = std::stoull(optarg);
                 break;
-            case 'P':
-                priority = std::stoul(optarg);
-                break;
             case 'B':
                 set_before_connect = true;
                 break;
@@ -108,17 +107,32 @@ int parse_args(int argc, char *argv[])
             case 'r':
                 repeats = std::stoul(optarg);
                 break;
+            case 'f': {
+                /* deadline_us[,deadline_us...] */
+                std::string spec = optarg;
+                size_t pos = 0;
+                while (pos <= spec.size()) {
+                    size_t end = spec.find(',', pos);
+                    if (end == std::string::npos)
+                        end = spec.size();
+                    struct flow_spec fs;
+                    fs.deadline_us = std::stoull(spec.substr(pos, end - pos));
+                    flows.push_back(fs);
+                    pos = end + 1;
+                }
+                break;
+            }
             default:
                 std::cout << "Usage: " << argv[0] <<
                     " [-i server_ip, default:192.168.6.1]" <<
                     " [-p server_port, default:50000]" <<
                     " [-b request bytes, must match server -b, default:100]" <<
                     " [-n total bytes, default:1000000]" <<
-                    " [-d deadline us, 0 = do not set deadline/size/priority (baseline), default:10000]" <<
-                    " [-P priority, default:1]" <<
+                    " [-d deadline us, 0 = do not set deadline/size (baseline), default:10000]" <<
                     " [-B set parameters before connect()]" <<
                     " [-S stream: send back to back, do not wait for responses]" <<
-                    " [-r repeat the transfer on new connections, default:1]" << std::endl;
+                    " [-r repeat the transfer on new connections, default:1]" <<
+                    " [-f concurrent flows of -n bytes each, deadline_us[,...] (0 = no deadline), implies -S, e.g. 25000,40000]" << std::endl;
                 return -1;
         }
     }
@@ -145,7 +159,7 @@ static int run_once(struct run_result *r)
 
     if (use_deadline && set_before_connect) {
         dl_start_us = now_us();
-        if (set_params(fd))
+        if (set_params(fd, deadline_us))
             return -1;
     }
 
@@ -160,7 +174,7 @@ static int run_once(struct run_result *r)
 
     if (use_deadline && !set_before_connect) {
         dl_start_us = now_us();
-        if (set_params(fd))
+        if (set_params(fd, deadline_us))
             return -1;
     }
 
@@ -223,6 +237,106 @@ static int run_once(struct run_result *r)
     return 0;
 }
 
+struct flow_run {
+    int fd;
+    uint64_t sent;
+    uint64_t resp;
+    uint64_t end_us;
+};
+
+/**
+ * -f: connect all flows first, then set their parameters and start them
+ * together, so they compete for the bottleneck. Writes are round robin, one
+ * message per flow per pass: the application offers the same load to every
+ * flow and the transport decides who gets the bandwidth.
+ * fct[i] / met[i] collect the completion time / deadlines met of flow i.
+ */
+static int run_concurrent(std::vector<std::vector<uint64_t>> &fct, std::vector<unsigned int> &met)
+{
+    std::vector<struct flow_run> runs(flows.size());
+
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(server_port);
+    addr.sin_addr.s_addr = inet_addr(server_ip_str.c_str());
+
+    for (auto &r : runs) {
+        r = {};
+        r.fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (r.fd < 0) {
+            perror("socket");
+            return -1;
+        }
+        if (connect(r.fd, (struct sockaddr *)&addr, sizeof(addr))) {
+            perror("connect");
+            return -1;
+        }
+        if (fcntl(r.fd, F_SETFL, fcntl(r.fd, F_GETFL, 0) | O_NONBLOCK)) {
+            fprintf(stderr, "fcntl O_NONBLOCK failed\n");
+            return -1;
+        }
+    }
+
+    uint64_t start_us = now_us();
+    for (size_t i = 0; i < flows.size(); i++) {
+        if (flows[i].deadline_us && set_params(runs[i].fd, flows[i].deadline_us))
+            return -1;
+    }
+
+    /* the server answers every message_bytes it receives: the last answer
+     * means the last byte was delivered */
+    uint64_t expect_resp = total_bytes / message_bytes * SHORT_RESPONSE_SIZE;
+    char *buf = (char *)calloc(1, message_bytes);
+    char rbuf[65536];
+    size_t active = runs.size();
+    while (active) {
+        for (auto &r : runs) {
+            if (r.end_us)
+                continue;
+            ssize_t ret;
+            if (r.sent < total_bytes) {
+                ret = write(r.fd, buf, std::min((uint64_t)message_bytes, total_bytes - r.sent));
+                if (ret < 0 && errno != EAGAIN) {
+                    fprintf(stderr, "write failed: %s\n", strerror(errno));
+                    return -1;
+                }
+                if (ret > 0)
+                    r.sent += ret;
+            }
+            while ((ret = read(r.fd, rbuf, sizeof(rbuf))) > 0)
+                r.resp += ret;
+            if (ret < 0 && errno != EAGAIN) {
+                fprintf(stderr, "read failed: %s\n", strerror(errno));
+                return -1;
+            }
+            if (r.sent >= total_bytes && r.resp >= expect_resp) {
+                r.end_us = now_us();
+                active--;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < runs.size(); i++) {
+        uint64_t us = runs[i].end_us - start_us;
+        fct[i].push_back(us);
+        if (flows[i].deadline_us) {
+            met[i] += us <= flows[i].deadline_us;
+            printf("flow %zu (deadline %lu us): %lu bytes in %lu us, %s (slack %ld us), goodput %.1f Mbps\n",
+                   i, flows[i].deadline_us, runs[i].sent, us,
+                   us <= flows[i].deadline_us ? "MET" : "MISSED", (int64_t)flows[i].deadline_us - (int64_t)us,
+                   runs[i].sent * 8.0 / us);
+        } else {
+            printf("flow %zu (no deadline): %lu bytes in %lu us, goodput %.1f Mbps\n",
+                   i, runs[i].sent, us, runs[i].sent * 8.0 / us);
+        }
+    }
+
+    free(buf);
+    for (auto &r : runs)
+        close(r.fd);
+    return 0;
+}
+
 static uint64_t percentile(std::vector<uint64_t> v, double p)
 {
     std::sort(v.begin(), v.end());
@@ -233,6 +347,33 @@ int main(int argc, char *argv[])
 {
     if (parse_args(argc, argv))
         return -1;
+    /* line buffered even through a pipe (tee): a run that hangs or crashes keeps its output */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
+    if (!flows.empty()) {
+        if (total_bytes % message_bytes) {
+            fprintf(stderr, "-f needs -n to be a multiple of -b\n");
+            return -1;
+        }
+        std::vector<std::vector<uint64_t>> fct(flows.size());
+        std::vector<unsigned int> met(flows.size());
+        for (unsigned int i = 0; i < repeats; i++) {
+            if (run_concurrent(fct, met))
+                return -1;
+        }
+        for (size_t i = 0; i < flows.size(); i++) {
+            double mean = 0;
+            for (auto x : fct[i]) mean += x;
+            mean /= fct[i].size();
+            printf("SUMMARY flow %zu deadline_us %lu | runs %u | fct_us mean %.0f p50 %lu max %lu | goodput_mean_Mbps %.1f",
+                   i, flows[i].deadline_us, repeats, mean, percentile(fct[i], 50),
+                   percentile(fct[i], 100), total_bytes * 8.0 / mean);
+            if (flows[i].deadline_us)
+                printf(" | met %u/%u", met[i], repeats);
+            printf("\n");
+        }
+        return 0;
+    }
     if (stream && total_bytes % message_bytes)
         fprintf(stderr, "warning: -n is not a multiple of -b, completion is measured at the last write\n");
 
