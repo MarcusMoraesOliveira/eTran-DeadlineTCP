@@ -260,6 +260,9 @@ static void tcp_socket_release(struct kref *kref)
     struct eTran_socket_t *s = container_of(kref, struct eTran_socket_t, ref);
     if (s->conn)
     {
+        /* don't leave dangling pointers in the per-thread work lists */
+        s->tctx->free_pending_conns.remove(s->conn);
+        s->tctx->retransmission_conns.remove_if([s](const auto &p) { return p.first == s->conn; });
         delete s->conn;
     }
 

@@ -1059,16 +1059,24 @@ static inline void tcp_free_buffers(struct app_ctx_per_thread *tctx)
 {
     struct thread_bcache *bc = &tctx->iobuffer;
 
-    while (!tctx->free_pending_conns.empty()) {
-        auto it = tctx->free_pending_conns.begin();
+    auto it = tctx->free_pending_conns.begin();
+    while (it != tctx->free_pending_conns.end()) {
         struct eTrantcp_connection *conn = *it;
-        while (conn->pending_free_bytes) {
+        // only free whole packets: an ACK can end in the middle of a packet
+        while (!conn->unack_tx_addrs.empty() &&
+               conn->unack_tx_addrs.front().second <= conn->pending_free_bytes) {
             auto [addr, plen] = conn->unack_tx_addrs.front();
             conn->unack_tx_addrs.pop_front();
             thread_bcache_prod(bc, addr);
             conn->pending_free_bytes -= plen;
         }
-        tctx->free_pending_conns.erase(it);
+        if (conn->unack_tx_addrs.empty())
+            conn->pending_free_bytes = 0;
+        // keep the connection queued until the partially acked packet is freed
+        if (conn->pending_free_bytes)
+            it++;
+        else
+            it = tctx->free_pending_conns.erase(it);
     }
 }
 
