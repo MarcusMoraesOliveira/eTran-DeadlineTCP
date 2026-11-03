@@ -352,48 +352,20 @@ footer(s, 7, "10 execuções cada · 100 MB por fluxo")
 
 # ---------------- 8. Related work: D2TCP ----------------
 s = new_slide()
-header(s, "Trabalho relacionado", "D²TCP: a mesma ideia, aplicada na janela do TCP")
-text(s, 80, 140, 1120, 28, [[("Vamanan, Hasan e Vijaykumar. ", {}), ("Deadline-Aware Datacenter TCP.", {"color": "ink"}), (" SIGCOMM 2012.", {})]], 19, "ink2")
-rows = [["", "D²TCP", "DeadlineTCP"]] + [['Medida de urgência', 'd = tempo necessário ÷ tempo restante', 'urgência = tempo restante ÷ tempo necessário (= 1/d)'], ['Como reage', 'Na janela: ao receber ECN, reduz W × (1 − α^d/2)', 'No pacing rate: modo urgente, moderado ou normal'], ['Flow com folga', 'Cede só quando há congestionamento (marcação ECN)', 'Cede sempre: envia só o rate que o deadline exige'], ['Sinal de congestionamento', 'ECN nos switches (DCTCP)', 'RTT (TIMELY), sem ECN'], ['Onde roda', 'TCP do kernel Linux', 'Fast path eBPF do eTran (AF_XDP)']]
-widths = [250, 435, 435]
-tshape = s.shapes.add_table(len(rows), 3, E(80), E(190), E(sum(widths)), E(44 + 76 * (len(rows) - 1)))
-tbl = tshape.table
-tblPr = tshape._element.graphic.graphicData.tbl.tblPr
-for attr in ("bandRow", "firstRow"):
-    tblPr.set(attr, "0")
-st = tblPr.find(qn("a:tableStyleId"))
-if st is not None:
-    st.text = "{2D5ABB26-0587-4C30-8999-92F81FD0307C}"
-for j, wd in enumerate(widths):
-    tbl.columns[j].width = E(wd)
-for i, row in enumerate(rows):
-    tbl.rows[i].height = E(44 if i == 0 else 76)
-    for j, val in enumerate(row):
-        cell = tbl.cell(i, j)
-        cell.fill.solid()
-        cell.fill.fore_color.rgb = rgb(C["asoft"] if j == 2 else C["white"])
-        cell.vertical_anchor = MSO_ANCHOR.MIDDLE
-        cell.margin_left = cell.margin_right = E(14)
-        tf = cell.text_frame; tf.text = ""; tf.word_wrap = True
-        r = tf.paragraphs[0].add_run(); r.text = val
-        if i == 0:
-            r.font.name, r.font.size, r.font.bold, r.font.color.rgb = SANS, Pt(18 * 0.75), True, rgb(C["ink"])
-        else:
-            r.font.name, r.font.size = SANS, Pt(18 * 0.75)
-            r.font.bold = j == 0
-            r.font.color.rgb = rgb(C["ink"] if j == 0 else C["ink2"])
-        tcPr = cell._tc.get_or_add_tcPr()
-        for side in ("a:lnL", "a:lnR", "a:lnT", "a:lnB"):
-            ln = etree.SubElement(tcPr, qn(side))
-            if side == "a:lnB":
-                ln.set("w", str(9525))
-                sf = etree.SubElement(ln, qn("a:solidFill")); c_ = etree.SubElement(sf, qn("a:srgbClr")); c_.set("val", C["rule"])
-            else:
-                ln.set("w", "0"); etree.SubElement(ln, qn("a:noFill"))
-        fill = tcPr.find(qn("a:solidFill"))
-        if fill is not None:
-            tcPr.remove(fill); tcPr.append(fill)
-footer(s, 8, "Mesma noção de urgência; o DeadlineTCP cede banda antes de haver congestionamento")
+header(s, "Trabalho relacionado", "D²TCP: Deadline-Aware Datacenter TCP")
+text(s, 80, 138, 1120, 28, "Vamanan, Hasan e Vijaykumar · SIGCOMM 2012", 19, "ink2")
+for (x, y, w, h, title, body) in [(80, 185, 552, 170, "Problema", 'Em datacenters, muitas respostas têm deadline (ex.: busca web): uma resposta atrasada é descartada. O TCP e o DCTCP tratam todos os flows igual.'),
+                                  (80, 371, 552, 130, "Ideia", 'Quando há congestionamento, flows perto do deadline reduzem menos a janela e flows longe do deadline reduzem mais.'),
+                                  (80, 517, 552, 140, "Resultado", 'Roda em switches comuns (só precisa de ECN) e reduz a fração de deadlines perdidos em relação ao DCTCP e ao D³.')]:
+    rect(s, x, y, w, h, "white", "rule", radius=8)
+    text(s, x + 22, y + 16, w - 44, 30, title, 22, "ink", True)
+    text(s, x + 22, y + 52, w - 44, h - 60, body, 19, "ink2")
+rect(s, 648, 185, 552, 472, "asoft", "aline", radius=8)
+text(s, 670, 201, 508, 30, "Como funciona", 22, "ink", True)
+for i, m in enumerate(['α = fração de pacotes marcados com ECN (DCTCP)', 'd = tempo necessário ÷ tempo restante', 'p = α^d', 'W ← W × (1 − p/2)']):
+    text(s, 670, 250 + i * 48, 508, 30, m, 19, "ink", font=MONO)
+text(s, 670, 460, 508, 80, ['d > 1, atrasado: p menor, reduz pouco', 'd < 1, adiantado: p maior, reduz mais'], 17, "ink2", lsp=1.3)
+footer(s, 8, "Fonte: Vamanan, Hasan, Vijaykumar. Deadline-Aware Datacenter TCP. SIGCOMM 2012")
 
 # ---------------- 9. Takeaways ----------------
 s = new_slide()

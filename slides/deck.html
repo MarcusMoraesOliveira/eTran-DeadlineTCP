@@ -94,6 +94,14 @@ table.d2 td { font-size: 18px; padding: 13px 14px; }
 table.d2 td:first-child { width: 230px; }
 table.d2 th:last-child, table.d2 td:last-child { background: var(--a-soft); }
 table.rel .ven { font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); }
+.d2grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; gap: 16px; flex: 1; min-height: 0; }
+.d2card { border: 1px solid var(--rule); border-radius: 8px; padding: 18px 22px; display: flex; flex-direction: column; gap: 8px; }
+.d2card h3 { margin: 0; font-size: 22px; color: var(--ink); }
+.d2card p { font-size: 19px; }
+.d2card.mech { background: var(--a-soft); border-color: #b9d4f3; grid-row: span 3; }
+.d2card.mech .f { font-family: var(--mono); font-size: 19px; color: var(--ink); }
+.d2card.mech .note { font-size: 17px; margin-top: 8px; }
+.d2card.res { grid-column: 1; }
 /* setup slide */
 .crit-wrap { display: flex; flex-direction: column; gap: 12px; }
 .crit-title { font-size: 19px; font-weight: 600; color: var(--ink); }
@@ -376,13 +384,15 @@ table.t tr.win td { background: var(--a-soft); }
 <!-- 7b Related work -->
 <section class="slide">
   <p class="kicker">Trabalho relacionado</p>
-  <h2>D²TCP: a mesma ideia, aplicada na janela do TCP</h2>
-  <p style="font-size:19px;margin-top:-8px;">Vamanan, Hasan e Vijaykumar. <i>Deadline-Aware Datacenter TCP.</i> SIGCOMM 2012.</p>
-  <table class="t rel d2">
-    <tr><th></th><th>D²TCP</th><th>DeadlineTCP</th></tr>
-    <tr><td><b>Medida de urgência</b></td><td>d = tempo necessário ÷ tempo restante</td><td>urgência = tempo restante ÷ tempo necessário (= 1/d)</td></tr><tr><td><b>Como reage</b></td><td>Na janela: ao receber ECN, reduz W × (1 − α<sup>d</sup>/2)</td><td>No pacing rate: modo urgente, moderado ou normal</td></tr><tr><td><b>Flow com folga</b></td><td>Cede só quando há congestionamento (marcação ECN)</td><td>Cede sempre: envia só o rate que o deadline exige</td></tr><tr><td><b>Sinal de congestionamento</b></td><td>ECN nos switches (DCTCP)</td><td>RTT (TIMELY), sem ECN</td></tr><tr><td><b>Onde roda</b></td><td>TCP do kernel Linux</td><td>Fast path eBPF do eTran (AF_XDP)</td></tr>
-  </table>
-  <div class="foot"><span>Mesma noção de urgência; o DeadlineTCP cede banda antes de haver congestionamento</span><span class="pg"></span></div>
+  <h2>D²TCP: Deadline-Aware Datacenter TCP</h2>
+  <p style="font-size:19px;margin-top:-8px;">Vamanan, Hasan e Vijaykumar · SIGCOMM 2012</p>
+  <div class="d2grid">
+    <div class="d2card"><h3>Problema</h3><p>Em datacenters, muitas respostas têm deadline (ex.: busca web): uma resposta atrasada é descartada. O TCP e o DCTCP tratam todos os flows igual.</p></div>
+    <div class="d2card mech"><h3>Como funciona</h3><div class="f">α = fração de pacotes marcados com ECN (DCTCP)</div><div class="f">d = tempo necessário ÷ tempo restante</div><div class="f">p = α<sup>d</sup></div><div class="f">W ← W × (1 − p/2)</div><p class="note">d > 1, atrasado: p menor, reduz pouco<br>d < 1, adiantado: p maior, reduz mais</p></div>
+    <div class="d2card"><h3>Ideia</h3><p>Quando há congestionamento, flows perto do deadline reduzem menos a janela e flows longe do deadline reduzem mais.</p></div>
+    <div class="d2card res"><h3>Resultado</h3><p>Roda em switches comuns (só precisa de ECN) e reduz a fração de deadlines perdidos em relação ao DCTCP e ao D³.</p></div>
+  </div>
+  <div class="foot"><span>Fonte: Vamanan, Hasan, Vijaykumar. Deadline-Aware Datacenter TCP. SIGCOMM 2012</span><span class="pg"></span></div>
 </section>
 
 <!-- 7 Limits -->
