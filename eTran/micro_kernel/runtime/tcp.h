@@ -59,6 +59,15 @@ const uint64_t CC_INTERVAL_RTT = 2;
 /* normal (slack >= RTT): 1 = pace at least at R_target, 0 = plain congestion control
  * (the plan's rule, which lets a flow in slow start waste its slack) */
 #define DL_NORMAL_FLOOR 1
+/* normal (slack >= RTT): cap pacing at B_remaining / (T_remaining - guard) * this,
+ * so a flow with slack yields the bottleneck to urgent flows (Phase 5);
+ * 0 = plain congestion control. The gain covers the pacer delivering less than
+ * the paced rate (measured ~0.75-0.95x: lost send slots are not made up) */
+#define DL_YIELD_GAIN 1.15
+/* finish this fraction of the deadline window (deadline - start) early, at least
+ * 4 RTT: the yield target, so estimation noise does not push the flow past the
+ * deadline. Inside the guard the flow no longer yields */
+#define DL_YIELD_GUARD 0.1
 
 /* urgent gain = 1 + (DL_PROBE_GAIN - 1) / urgency, capped here: the further behind
  * schedule, the harder a flow pushes over R_available */

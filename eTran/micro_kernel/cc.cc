@@ -387,13 +387,17 @@ void timely_cc(struct tcp_connection *c, struct bpf_cc_snapshot *stats, uint64_t
  *
  *   urgency < 1    urgent:   pace at R_available * min(DL_URGENT_GAIN_MAX, 1 + (DL_PROBE_GAIN - 1) / urgency)
  *   slack < RTT    moderate: pace at max(cc rate, min(R_available, R_required * DL_MODERATE_GAIN))
- *   otherwise      normal congestion control, but at least R_target (DL_NORMAL_FLOOR)
+ *   otherwise      normal: pace at min(cc rate, R_required * DL_YIELD_GAIN) (Phase 5),
+ *                  but at least R_target (DL_NORMAL_FLOOR)
  *
  * Only the deadline drives the policy. Urgency has no unit: 1 means the flow
  * finishes exactly at the deadline at R_available, so urgency < 1 is the same
  * as slack < 0, and the further behind schedule the flow is, the harder it
  * pushes. Each flow only looks at its own deadline: competing flows are not
- * coordinated.
+ * coordinated. Prioritization comes from flows with slack yielding: an urgent
+ * flow cannot take bandwidth from a flow that is not limited by its pacing
+ * rate, so flows ahead of schedule cap themselves near R_required. Flows
+ * without deadline parameters are not affected and do not yield.
  *
  * R_available is the measured capacity (r_bw); before the first sample the
  * link rate is the upper bound. c->cc_rate (kbps) is updated in place; the
@@ -449,6 +453,18 @@ void deadline_cc(struct tcp_connection *c, struct deadline_tcp_state *dl, uint64
     {
         dl->mode = DL_MODE_NORMAL;
         pacing = cc_Bps;
+        /* plenty of slack: send only what the deadline needs (with margin) and
+         * leave the rest of the bottleneck to flows that are behind schedule.
+         * Speeding up the urgent flow alone does not take bandwidth from flows
+         * that are not limited by their pacing rate (Phase 5 runs: identical FCTs) */
+        /* aim at a point before the deadline: pacing at R_required * gain with
+         * R_required recomputed against the deadline itself slows down as the
+         * flow gets ahead and converges to finishing exactly at the deadline
+         * (b ~ (T - t)^gain); measured: 100 MB flows missed by 3-10 ms */
+        double guard_ns = std::max(DL_YIELD_GUARD * (double)(dl->deadline_ns - dl->start_ns), 4 * rtt_ns);
+        double t_goal = (double)t_rem - guard_ns;
+        if (DL_YIELD_GAIN > 0 && t_goal > 0)
+            pacing = std::min(pacing, b_rem * 1e9 / t_goal * DL_YIELD_GAIN);
 #if DL_NORMAL_FLOOR
         /* slack assumes sending at R_available from now on; a flow still in slow
          * start would waste it, so never pace below what the deadline needs */
