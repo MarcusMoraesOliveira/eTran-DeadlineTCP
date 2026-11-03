@@ -181,6 +181,10 @@ struct app_ctx_per_thread {
 
     // connections that need to retransmit
     std::list<std::pair<struct eTrantcp_connection *, uint32_t> > retransmission_conns;
+
+    // connections with unacked bytes, watched by the send timer (tcp_lib_rto)
+    std::list<struct eTrantcp_connection *> rto_conns;
+    uint64_t rto_scan_tsc = 0;
 };
 
 // application context in application

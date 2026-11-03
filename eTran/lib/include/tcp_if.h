@@ -97,7 +97,14 @@ struct eTrantcp_connection {
 
     uint32_t pending_free_bytes;
 
-    std::list<std::pair<uint64_t, uint32_t> > unack_tx_addrs;
+    /* sent, not yet freed packets in tx buffer order; pos = tx buffer position of
+     * the first payload byte, used to resend exactly from a go-back position */
+    struct unack_pkt {
+        uint64_t addr;
+        uint32_t plen;
+        uint32_t pos;
+    };
+    std::list<unack_pkt> unack_tx_addrs;
 
     std::list<std::pair<uint64_t, char *> > rx_addrs;
     std::list<std::pair<uint64_t, char *> > ooo_rx_addrs;
@@ -110,6 +117,11 @@ struct eTrantcp_connection {
     struct eTran_socket_t *s;
 
     bool try_accept_done;
+
+    /* send timer (tcp_lib_rto): last time eBPF reported progress for our
+     * unacked bytes, and whether the connection is in tctx->rto_conns */
+    uint64_t progress_tsc;
+    bool in_rto_list;
 
     eTrantcp_connection() {
         rxb_head = 0;
@@ -131,6 +143,8 @@ struct eTrantcp_connection {
         force_rx_bump = false;
         s = nullptr;
         try_accept_done = false;
+        progress_tsc = 0;
+        in_rto_list = false;
     }
     
     ~eTrantcp_connection() {  

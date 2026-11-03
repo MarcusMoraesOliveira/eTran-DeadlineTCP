@@ -45,6 +45,8 @@ typedef struct __attribute__((packed)) {
     __u64 flag;
     #define FLAG_SYNC          0x1
     #define FLAG_TO            0x2
+    /* with FLAG_SYNC: libetran asks for a resync (its send timer expired) */
+    #define FLAG_RESYNC        0x4
     // application has consumed how many bytes
     __u32 rx_bump;
     // number of bytes submitted in this batch
@@ -76,6 +78,9 @@ typedef struct __attribute__((packed)) {
         __u32 go_back_pos;
     };
     #define RECOVERY_MASK       0x80000000
+    /* with RECOVERY_MASK: resync, eBPF has nothing in flight, the next byte to
+     * send is at go_back_pos and every byte before it is acked */
+    #define RESYNC_MASK         0x40000000
     __u32 ooo_bump;
     #define OOO_SEGMENT_MASK    0x80000000
     #define OOO_FIN_MASK        0x40000000
@@ -298,6 +303,9 @@ struct bpf_tcp_conn {
     // used by XDP_REDIRECT
     // this value is updated when application calls open() or accept()
     __u8 qid2xsk[MAX_NIC_QUEUES];
+
+    /* last resync answered for a FLAG_RESYNC probe (tcp_tx_process) */
+    __u64 resync_ts;
 
 } __attribute__((packed, aligned(64)));
 

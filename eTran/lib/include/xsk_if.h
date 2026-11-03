@@ -206,8 +206,10 @@ static inline void homa_txmeta_set_flag(char *umem_area, uint64_t addr, uint32_t
 //////////////////////////// TCP ////////////////////////////
 #define FLAG_SYNC           0x1
 #define FLAG_TO             0x2
+#define FLAG_RESYNC         0x4
 #define FORCE_RX_BUMP_MASK  0x80000000
 #define RECOVERY_MASK       0x80000000
+#define RESYNC_MASK         0x40000000
 #define OOO_SEGMENT_MASK    0x80000000
 #define OOO_FIN_MASK        0x40000000
 #define OOO_CLEAR_MASK      0x20000000

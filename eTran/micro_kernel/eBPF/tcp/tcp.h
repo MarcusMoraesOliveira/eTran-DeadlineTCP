@@ -45,6 +45,8 @@ __u8 prev_conn_ece[MAX_CPU];
 
 // FIXME 
 #define TCP_WND_SCALE 3
+/* minimum interval between two answered resync probes of a connection */
+#define TCP_RESYNC_NS 1000000ULL
 
 #define TCP_OPT_END_OF_OPTIONS 0
 #define TCP_OPT_NO_OP 1
@@ -494,7 +496,11 @@ static __always_inline __u32 fast_retransmit(struct bpf_tcp_conn *c, struct bpf_
     }
 
     c->tx_pending = 0;
-    c->rx_remote_avail += go_back_bytes;
+    /* no rx_remote_avail += go_back_bytes: rx_remote_avail is the whole peer
+     * window from the ACK point (tcp_txavail() = rx_remote_avail - tx_sent), so
+     * clearing tx_sent already gives the bytes back. Adding them again inflated
+     * the window on every go-back (seen: 47 MB with a 512 KB max), the sender
+     * overran the receiver, the overflow was dropped, more go-backs followed */
 
     c->tx_sent = 0;
     cc->txp = 0;
@@ -509,6 +515,26 @@ static __always_inline __u32 fast_retransmit(struct bpf_tcp_conn *c, struct bpf_
     return c->tx_next_pos;
 }
 
+/* Answer a FLAG_RESYNC probe if nothing is in flight: turn the probe into a
+ * resync for libetran (next byte at tx_next_pos, all before acked). Rate
+ * limited per connection. Caller holds the lock; XDP_PASS = redirect to app */
+static __always_inline int tcp_tx_resync(struct bpf_tcp_conn *c, struct meta_info *data_meta, __u64 now)
+{
+    if (c->tx_sent || now - c->resync_ts <= TCP_RESYNC_NS)
+        return XDP_DROP;
+    c->resync_ts = now;
+    c->tx_pending = 0;
+    data_meta->rx.go_back_pos = c->tx_next_pos | RECOVERY_MASK | RESYNC_MASK;
+    data_meta->rx.qid = POISON_32;
+    data_meta->rx.conn = c->opaque_connection;
+    data_meta->rx.rx_pos = POISON_32;
+    data_meta->rx.poff = POISON_16;
+    data_meta->rx.plen = POISON_16;
+    data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
+    data_meta->rx.ooo_bump = POISON_32;
+    return XDP_PASS;
+}
+
 // Caller must hold bpf_spin_lock
 static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph, struct bpf_tcp_conn *c, struct meta_info *data_meta, void *data_end)
 {
@@ -520,6 +546,9 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
     __u32 tx_pending = data_meta->tx.tx_pending;
     __u32 tx_pos = data_meta->tx.tx_pos;
     
+    /* NOTE: tx_cached_ts is never written, so ref_ts is 0 while has_kick is
+     * set. Reading the clock here makes TIMELY pacing effective for every flow,
+     * which (2026-11-03) made plain flows slow and stall-prone: kept as is */
     __u64 ref_ts = 0;
     // optimization for timestamp
     if (!has_kick[cpu])
@@ -581,6 +610,12 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
     /* Pure sync packet from userspace, drop or send a extra window update */
     if (unlikely(data_meta->tx.flag & FLAG_SYNC)) {
         xdp_egress_log("pure ctrl signal");
+        /* libetran's send timer expired: if nothing is in flight here, tell it
+         * where we are (with something in flight, ACKs and timeouts do) */
+        if ((data_meta->tx.flag & FLAG_RESYNC) && tcp_tx_resync(c, data_meta, ref_ts) == XDP_PASS) {
+            TCP_UNLOCK(c);
+            return XDP_PASS;
+        }
         if (wnd_upd) {
             /* receive buffer freed up from empty, need to send out a window update, if
              * we're not sending anyways. */
@@ -597,11 +632,23 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
     // this is probably caused by fast retransmission as we reset the c->tx_next_pos
     // but there are pending packets in the queue, simply drop them
     if (unlikely(tx_pos != c->tx_next_pos)) {
+        /* libetran ahead of us with nothing in flight here: it only moves past
+         * bytes it saw acked (so the peer has them) -> skip forward to it.
+         * Dropping left the connection with libetran resending from a position
+         * we never reach and us waiting for one it already freed (stall) */
+        __u32 ahead = tx_pos >= c->tx_next_pos ? tx_pos - c->tx_next_pos
+                                               : tx_pos + c->tx_buf_size - c->tx_next_pos;
+        if (!c->tx_sent && ahead < (c->tx_buf_size >> 1)) {
+            c->tx_next_seq += ahead;
+            c->tx_next_pos = tx_pos;
+            goto pos_ok;
+        }
         TCP_UNLOCK(c);
         xdp_egress_log("tx_pos(%u) != c->tx_next_pos(%u)", tx_pos, c->tx_next_pos);
         // bpf_printk("tx_pos(%u) != c->tx_next_pos(%u)", tx_pos, c->tx_next_pos);
         return XDP_DROP;
     }
+pos_ok:
 
     if (tx_pending)
         c->tx_pending += tx_pending;
@@ -684,10 +731,13 @@ bypass_rl:
 static __always_inline int tcp_valid_rxack(struct bpf_tcp_conn *c, __u32 ack_seq, __u32 *bump)
 {
     __u32 exp_ack_first = c->tx_next_seq - c->tx_sent;
-    __u32 exp_ack_last = c->tx_next_seq;
-
-    // allow receving ack that we haven't sent yet, this is probably caused by retransmission
-    exp_ack_last += c->tx_pending;
+    /* after a go-back (fast_retransmit) tx_next_seq is behind what was really
+     * sent: if the data was not lost, the peer ACKs beyond tx_next_seq.
+     * Rejecting those ACKs (and the payload carried with them) while the peer
+     * drops the retransmitted duplicates livelocked the flow (445 MB
+     * retransmitted). Nothing beyond one tx buffer from the first unacked byte
+     * can have been sent; the caller clamps the bump to tx_sent */
+    __u32 exp_ack_last = exp_ack_first + c->tx_buf_size;
 
     if (exp_ack_first <= exp_ack_last) {
         if (ack_seq < exp_ack_first || ack_seq > exp_ack_last)
@@ -893,10 +943,21 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
         cc->cnt_rx_acks++;
         if (likely(tcp_valid_rxack(c, ack_seq, &tx_bump)) == 0) {
             if (unlikely(tx_bump > c->tx_sent)) {
-                tx_bump = 0;
-                /* this is probably caused by retransmission */
-                trigger_ack = false;
-                goto unlock;
+                /* ACK beyond tx_next_seq: a go-back was spurious, the peer got
+                 * the data sent before it. Fast-forward to the ACK (seq and
+                 * buffer position advance together) and tell libetran: next
+                 * byte at tx_next_pos, all before is acked. Only acking what is
+                 * in flight left tx_next_seq behind: new bytes got sequence
+                 * numbers the peer already had (dropped as duplicates) and the
+                 * gap grew until ACKs fell out of range (stall) */
+                __u32 ahead = tx_bump - c->tx_sent;
+                c->tx_next_seq += ahead;
+                c->tx_next_pos += ahead;
+                if (c->tx_next_pos >= c->tx_buf_size)
+                    c->tx_next_pos -= c->tx_buf_size;
+                c->tx_pending = 0;
+                tx_bump = c->tx_sent;
+                go_back_pos = c->tx_next_pos | RECOVERY_MASK | RESYNC_MASK;
             }
             cc->cnt_rx_ack_bytes += tx_bump;
             if (unlikely(tcph->ece == 1))
@@ -922,8 +983,10 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
             * 4. There is no window update: c->rx_remote_avail == ((bpf_ntohs(tcph->window)) << TCP_WND_SCALE)
             */
             /* duplicate ack ? */
-            else if (unlikely(c->tx_sent && payload_len == 0 && (c->rx_remote_avail == ((bpf_ntohs(tcph->window)) << TCP_WND_SCALE)) && ++c->rx_dupack_cnt == 3)) {
-                go_back_pos = fast_retransmit(c, cc);
+            else if (unlikely(!go_back_pos && c->tx_sent && payload_len == 0 && (c->rx_remote_avail == ((bpf_ntohs(tcph->window)) << TCP_WND_SCALE)) && ++c->rx_dupack_cnt == 3)) {
+                /* keep RECOVERY_MASK in the local: a go-back to position 0 must
+                 * still be reported to libetran (go_back_pos was tested as a bool) */
+                go_back_pos = fast_retransmit(c, cc) | RECOVERY_MASK;
                 xdp_log("Duplicate ACK triggers fast retransmission");
                 goto unlock;
             }
@@ -938,14 +1001,23 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
     #ifdef OOO_RECV
     __u32 trim_start, trim_end;
     if (unlikely(tcp_valid_rxseq_ooo(c, seq, payload_len, &trim_start, &trim_end))) {
-        trigger_ack = false;
+        /* keep trigger_ack (set when there is payload): a duplicate segment
+         * means our ACK was lost, and only a new ACK stops the sender from
+         * retransmitting it forever (RFC 9293: ACK unacceptable segments) */
         xdp_log_err("Bad seq");
         goto unlock;
     }
 
     payload_off += trim_start;
-    if (likely(payload_len >= trim_start + trim_end))
-        payload_len -= trim_start + trim_end;
+    if (unlikely(trim_end))
+        /* never accept the head of a segment that overflows the window: the ACK
+         * would end inside a sender packet, fast_retransmit() would then go back
+         * to a position inside a packet and libetran, which resends whole
+         * packets, would shift the stream (duplicate bytes at the receiver,
+         * txb_sent underflow at the sender, stall). Drop the payload and ACK. */
+        payload_len = 0;
+    else if (likely(payload_len >= trim_start))
+        payload_len -= trim_start;
     data_meta->rx.poff = payload_off;
     data_meta->rx.plen = payload_len;
 
@@ -1084,13 +1156,12 @@ unlock:
         
         data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
         xdp_log("xsk_budget_avail(%u)", data_meta->rx.xsk_budget_avail);
-        if (tx_bump)
-            data_meta->rx.ack_bytes = tx_bump;
-        else if (unlikely(go_back_pos)) {
+        if (unlikely(go_back_pos)) {
+            /* a resync also covers the bytes acked by this packet */
             xdp_log("go_back_pos(%u)", go_back_pos);
             data_meta->rx.go_back_pos = go_back_pos;
-            data_meta->rx.go_back_pos |= RECOVERY_MASK;
-        }
+        } else if (tx_bump)
+            data_meta->rx.ack_bytes = tx_bump;
 
         if (!payload_len) {
             data_meta->rx.rx_pos = POISON_32;

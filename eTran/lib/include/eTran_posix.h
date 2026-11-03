@@ -79,6 +79,17 @@ static inline size_t txb_bytes_avail(struct eTrantcp_connection *conn)
  * @param len the length of data to be submitted
  * @return 0 on success, -EINVAL on failure
  */
+/* watch a connection with unacked bytes (see tcp_lib_rto) */
+static inline void tcp_rto_arm(struct app_ctx_per_thread *tctx, struct eTrantcp_connection *conn)
+{
+    if (conn->txb_sent && !conn->in_rto_list)
+    {
+        conn->in_rto_list = true;
+        conn->progress_tsc = get_cycles();
+        tctx->rto_conns.push_back(conn);
+    }
+}
+
 static inline int eTran_tcp_tx_submit_zc(struct app_ctx_per_thread *tctx, struct eTrantcp_connection *conn, const void *buf, size_t len)
 {
     if (unlikely(conn->status != CONN_OPEN))
@@ -97,6 +108,7 @@ static inline int eTran_tcp_tx_submit_zc(struct app_ctx_per_thread *tctx, struct
 
     conn->txb_allocated -= len;
     conn->txb_sent += len;
+    tcp_rto_arm(tctx, conn);
 
     return 0;
 }
@@ -113,6 +125,7 @@ static inline int eTran_tcp_tx_submit_zc_retransmission(struct app_ctx_per_threa
 
     conn->txb_allocated -= len;
     conn->txb_sent += len;
+    tcp_rto_arm(tctx, conn);
 
     return 0;
 }
@@ -258,6 +271,11 @@ static inline ssize_t eTran_tcp_tx_reserve_zc(struct app_ctx_per_thread *tctx, s
         fprintf(stderr, "eTran_tcp_tx_reserve_zc(): conn->status != CONN_OPEN\n");
         return -EINVAL;
     }
+
+    /* rewound bytes are waiting for tcp_retransmission(): new data would be
+     * segmented at txb_head, i.e. over the rewound position */
+    if (unlikely(conn->txb_allocated))
+        return 0;
 
     avail = txb_bytes_avail(conn);
     if (avail < reserve_len)

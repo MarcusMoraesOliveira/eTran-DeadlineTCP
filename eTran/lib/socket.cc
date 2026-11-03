@@ -263,6 +263,7 @@ static void tcp_socket_release(struct kref *kref)
         /* don't leave dangling pointers in the per-thread work lists */
         s->tctx->free_pending_conns.remove(s->conn);
         s->tctx->retransmission_conns.remove_if([s](const auto &p) { return p.first == s->conn; });
+        s->tctx->rto_conns.remove(s->conn);
         delete s->conn;
     }
 

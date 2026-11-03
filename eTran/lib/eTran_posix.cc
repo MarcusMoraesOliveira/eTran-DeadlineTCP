@@ -145,10 +145,72 @@ static inline bool sync_state(struct app_ctx_per_thread *tctx, struct eTrantcp_c
 
     // Retransmission
     // reset conn->txb_head and conn->txb_sent
-    if (unlikely(go_back_pos != POISON_32 && go_back_pos & RECOVERY_MASK))
+    if (unlikely(go_back_pos != POISON_32 && (go_back_pos & RECOVERY_MASK) && (go_back_pos & RESYNC_MASK)))
+    {
+        /* RESYNC: eBPF has nothing in flight, the next byte to send is at
+         * pos and every byte before it is acked (eBPF fast-forwarded after a
+         * spurious go-back, or answered our send timer probe). Works in both
+         * directions: free what is acked, resend from pos what we have after it */
+        uint32_t pos = go_back_pos & ~(RECOVERY_MASK | RESYNC_MASK);
+        uint32_t una = conn->txb_head >= conn->txb_sent ? conn->txb_head - conn->txb_sent
+                                                       : conn->txb_head + conn->tx_buf_size - conn->txb_sent;
+        uint32_t total = conn->txb_sent + conn->txb_allocated;
+        uint32_t acked = pos >= una ? pos - una : pos + conn->tx_buf_size - una;
+        conn->progress_tsc = get_cycles();
+        {
+            static unsigned int dbg = 0;
+            if (dbg++ < 40)
+                fprintf(stderr, "resync conn %p: pos %u head %u txb_sent %u allocated %u una %u acked %u total %u pending_free %u pkts %zu front %u%s\n",
+                        conn, pos, conn->txb_head, conn->txb_sent, conn->txb_allocated, una, acked, total,
+                        conn->pending_free_bytes, conn->unack_tx_addrs.size(),
+                        conn->unack_tx_addrs.empty() ? 0 : conn->unack_tx_addrs.front().pos, to ? " (probe)" : "");
+        }
+        if (unlikely(acked > total))
+        {
+            /* pos is behind bytes we saw acked: resend from una, eBPF skips
+             * forward when it sees our position */
+            conn->txb_head = una;
+            conn->txb_sent = 0;
+            conn->txb_allocated = total;
+            if (total)
+            {
+                bool queued = false;
+                for (auto &rc : tctx->retransmission_conns)
+                    queued |= rc.first == conn;
+                if (!queued)
+                    tctx->retransmission_conns.push_back(std::make_pair(conn, total));
+            }
+        }
+        else
+        {
+            if (acked)
+            {
+                if (!conn->pending_free_bytes)
+                    tctx->free_pending_conns.push_back(conn);
+                conn->pending_free_bytes += acked;
+            }
+            conn->txb_head = pos;
+            conn->txb_sent = 0;
+            conn->txb_allocated = total - acked;
+            if (conn->txb_allocated)
+            {
+                bool queued = false;
+                for (auto &rc : tctx->retransmission_conns)
+                    queued |= rc.first == conn;
+                if (!queued)
+                    tctx->retransmission_conns.push_back(std::make_pair(conn, conn->txb_allocated));
+            }
+        }
+    }
+    else if (unlikely(go_back_pos != POISON_32 && go_back_pos & RECOVERY_MASK))
     {
         go_back_pos &= ~RECOVERY_MASK;
-        if (likely(go_back_pos != conn->txb_head))
+        conn->progress_tsc = get_cycles();
+        /* positions are modulo tx_buf_size: going back a full buffer lands on
+         * txb_head again. Skipping it left txb_sent == tx_buf_size forever while
+         * eBPF had tx_sent == 0 (nothing in flight, no budget to send) */
+        bool full_go_back = go_back_pos == conn->txb_head && conn->txb_sent == conn->tx_buf_size;
+        if (likely(go_back_pos != conn->txb_head || full_go_back))
         {
             if (conn->txb_head > go_back_pos)
             {
@@ -158,6 +220,14 @@ static inline bool sync_state(struct app_ctx_per_thread *tctx, struct eTrantcp_c
             {
                 go_back_bytes = conn->tx_buf_size - (go_back_pos - conn->txb_head);
             }
+            /* never rewind before bytes we saw acked (their frames may be
+             * freed): go back to una at most, eBPF skips forward to it */
+            if (unlikely(go_back_bytes > conn->txb_sent))
+            {
+                go_back_bytes = conn->txb_sent;
+                go_back_pos = conn->txb_head >= go_back_bytes ? conn->txb_head - go_back_bytes
+                                                              : conn->txb_head + conn->tx_buf_size - go_back_bytes;
+            }
             conn->txb_head = go_back_pos;
             conn->txb_allocated += go_back_bytes;
             conn->txb_sent -= go_back_bytes;
@@ -166,7 +236,12 @@ static inline bool sync_state(struct app_ctx_per_thread *tctx, struct eTrantcp_c
 #endif
             // enqueue to retransmission queue
             // fprintf(stdout, "Reset pointer to %u for conn(%p)\n", go_back_pos, conn);
-            tctx->retransmission_conns.push_back(std::make_pair(conn, go_back_bytes));
+            /* one entry per connection: tcp_retransmission() resends all rewound bytes */
+            bool queued = false;
+            for (auto &rc : tctx->retransmission_conns)
+                queued |= rc.first == conn;
+            if (!queued)
+                tctx->retransmission_conns.push_back(std::make_pair(conn, go_back_bytes));
         }
     }
 
@@ -187,7 +262,12 @@ static inline bool sync_state(struct app_ctx_per_thread *tctx, struct eTrantcp_c
         // can_continue_send |= txb_bytes_avail(conn) >= (TCP_MSS_W_TS << 2);
     }
 
-    if (unlikely(old_txb_sent != conn->txb_sent))
+    /* ack_bytes and go_back_pos share one field: with RECOVERY_MASK set it is a
+     * position, never acked bytes. Checking only for a txb_sent change missed a
+     * go-back to the current txb_head, which then subtracted
+     * (go_back_pos | RECOVERY_MASK) from txb_sent -> txb_sent ~2^31, no send budget */
+    if (unlikely((go_back_pos != POISON_32 && (rxmeta_go_back_pos(pkt) & RECOVERY_MASK)) ||
+                 old_txb_sent != conn->txb_sent))
     {
         // retransmission happens, it's impossible to ack bytes
         return send_event;
@@ -196,7 +276,8 @@ static inline bool sync_state(struct app_ctx_per_thread *tctx, struct eTrantcp_c
     // ack bytes
     if (ack_bytes != POISON_32 && ack_bytes)
     {
-        conn->txb_sent -= ack_bytes;
+        conn->txb_sent -= std::min(ack_bytes, conn->txb_sent);
+        conn->progress_tsc = get_cycles();
 #ifdef DEBUG
         printf("sync_state: ack_bytes = %u\n", ack_bytes);
 #endif
@@ -376,7 +457,7 @@ int tcp_nic_poll(struct app_ctx_per_thread *tctx, struct eTrantcp_event *ret_eve
             for (unsigned int i = 0; i < rcvd; i++) {
                 uint64_t addr = *eTran_cq__comp_addr(cq, idx_cq + i, tctx->actx->uring[qidx].comp_offset);
                 if (unlikely(tcp_txmeta_get_from_slowpath(tctx->txrx_xsk_info[qidx]->umem_area, addr) || 
-                    tcp_txmeta_get_flag(tctx->txrx_xsk_info[qidx]->umem_area, addr) == FLAG_SYNC)) {
+                    (tcp_txmeta_get_flag(tctx->txrx_xsk_info[qidx]->umem_area, addr) & FLAG_SYNC))) {
                     thread_bcache_prod(bc, addr);
                     if (unlikely(tcp_txmeta_get_from_slowpath(tctx->txrx_xsk_info[qidx]->umem_area, addr))) {
                         sp++;
@@ -648,7 +729,7 @@ int tcp_nic_poll_epoll(struct app_ctx_per_thread *tctx, struct eTrantcp_event *r
             for (unsigned int i = 0; i < rcvd; i++) {
                 uint64_t addr = *eTran_cq__comp_addr(cq, idx_cq + i, tctx->actx->uring[qidx].comp_offset);
                 if (unlikely(tcp_txmeta_get_from_slowpath(tctx->txrx_xsk_info[qidx]->umem_area, addr) || 
-                    tcp_txmeta_get_flag(tctx->txrx_xsk_info[qidx]->umem_area, addr) == FLAG_SYNC)) {
+                    (tcp_txmeta_get_flag(tctx->txrx_xsk_info[qidx]->umem_area, addr) & FLAG_SYNC))) {
                     thread_bcache_prod(bc, addr);
                     if (unlikely(tcp_txmeta_get_from_slowpath(tctx->txrx_xsk_info[qidx]->umem_area, addr))) {
                         sp++;
@@ -779,30 +860,48 @@ size_t tcp_flow_tx_segmentation_zc_retransmission(struct app_ctx_per_thread *tct
     tx = &tctx->txrx_xsk_info[qidx]->tx;
 
     unsigned int total_submit_pkts = 0;
-    auto it = conn->unack_tx_addrs.begin();
     uint64_t first_pkt_addr = POISON_64;
 
-    uint32_t skip_len = 0;
-    
-    while (len)
+    /* Resend from the packet that starts at txb_head (the go-back position).
+     * The old walk skipped the first txb_sent bytes of unack_tx_addrs, which
+     * also holds acked but not yet freed bytes and failed on an exact packet
+     * boundary (<): it could resend the wrong packet under the go-back position
+     * (shifted stream) or nothing at all (rewound bytes never resent: stall) */
+    auto it = conn->unack_tx_addrs.begin();
+    while (it != conn->unack_tx_addrs.end() && it->pos != conn->txb_head)
+        it++;
+    if (unlikely(it == conn->unack_tx_addrs.end()))
     {
-        if (total_submit_pkts)
-            it++;
-        if (it == conn->unack_tx_addrs.end())
-            break;
-        uint64_t addr = it->first;
-        uint32_t plen = it->second;
-
-        skip_len += plen;
-        if (skip_len < conn->txb_sent) {
-            it++;
-            continue;
-        }
-
-        while (xsk_ring_prod__reserve(tx, 1, &idx_tx) < 1)
+        static unsigned int warned = 0;
+        if (warned++ < 5)
         {
-            kick_tx(tctx->txrx_xsk_fd[qidx], tx);
+            fprintf(stderr, "retransmission: no packet at txb_head %u (txb_sent %u allocated %u pending_free %u, %zu pkts, front pos %u plen %u, back pos %u plen %u)\n",
+                    conn->txb_head, conn->txb_sent, conn->txb_allocated, conn->pending_free_bytes,
+                    conn->unack_tx_addrs.size(), conn->unack_tx_addrs.front().pos, conn->unack_tx_addrs.front().plen,
+                    conn->unack_tx_addrs.back().pos, conn->unack_tx_addrs.back().plen);
+            uint32_t prev_end = POISON_32;
+            unsigned int gaps = 0;
+            for (auto &u : conn->unack_tx_addrs)
+            {
+                if (prev_end != POISON_32 && u.pos != prev_end % conn->tx_buf_size && gaps++ < 3)
+                    fprintf(stderr, "  non-contiguous: pos %u after end %u\n", u.pos, prev_end % conn->tx_buf_size);
+                prev_end = u.pos + u.plen;
+            }
         }
+        return 0;
+    }
+
+    for (; len && it != conn->unack_tx_addrs.end(); it++)
+    {
+        uint64_t addr = it->addr;
+        uint32_t plen = it->plen;
+
+        /* TX ring full: stop, tcp_retransmission() resends the rest on a later
+         * poll. Spinning here deadlocked: the kernel only consumes the TX ring
+         * while the completion ring has room, and that ring is drained by the
+         * same poll loop we were blocking */
+        if (xsk_ring_prod__reserve(tx, 1, &idx_tx) < 1)
+            break;
 
         tcp_txmeta_clear_all(umem_area, addr);
         tcp_txmeta_pos(umem_area, addr, conn->txb_head);
@@ -927,7 +1026,7 @@ void tcp_flow_tx_segmentation_zc(struct app_ctx_per_thread *tctx, struct eTrantc
 
             dma(pkt, (uint8_t *)buf + copy_offset, plen);
 
-            conn->unack_tx_addrs.push_back({addr, plen});
+            conn->unack_tx_addrs.push_back({addr, plen, conn->txb_head});
 
             desc->addr = addr;
             desc->len = sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE + plen;
@@ -950,6 +1049,79 @@ void tcp_flow_tx_segmentation_zc(struct app_ctx_per_thread *tctx, struct eTrantc
     }
     tctx->txrx_xsk_info[qidx]->outstanding += total_submit_pkts;
     kick_tx(tctx->txrx_xsk_fd[qidx], tx);
+}
+
+/* no progress for our unacked bytes for this long: ask eBPF to resync. Well
+ * above the micro_kernel RTO (max(4 RTT, TCP_RTO_MIN = 4 ms)), which handles
+ * every case where eBPF itself has bytes in flight */
+#define LIB_RTO_US 10000
+#define LIB_RTO_SCAN_US 1000
+
+/**
+ * @brief send timer: libetran and eBPF can disagree about the send state (lost
+ *        ACK or go-back notifications, segments eBPF dropped). With nothing in
+ *        flight in eBPF no ACK or timeout fixes that and the connection stalls
+ *        with txb_sent > 0. For connections without progress for LIB_RTO_US,
+ *        send a FLAG_SYNC | FLAG_RESYNC probe (own frame, no payload): if eBPF
+ *        has nothing in flight it answers with a RESYNC (see sync_state())
+ */
+static void tcp_lib_rto(struct app_ctx_per_thread *tctx)
+{
+    if (tctx->rto_conns.empty())
+        return;
+    uint64_t now = get_cycles();
+    static uint64_t scan_cycles = 0, rto_cycles = 0;
+    if (unlikely(!scan_cycles)) {
+        scan_cycles = get_cycles_per_sec() * LIB_RTO_SCAN_US / 1e6;
+        rto_cycles = get_cycles_per_sec() * LIB_RTO_US / 1e6;
+    }
+    if (now - tctx->rto_scan_tsc < scan_cycles)
+        return;
+    tctx->rto_scan_tsc = now;
+
+    auto it = tctx->rto_conns.begin();
+    while (it != tctx->rto_conns.end())
+    {
+        struct eTrantcp_connection *conn = *it;
+        if ((!conn->txb_sent && !conn->txb_allocated) || conn->status != CONN_OPEN)
+        {
+            conn->in_rto_list = false;
+            it = tctx->rto_conns.erase(it);
+            continue;
+        }
+        if (now - conn->progress_tsc >= rto_cycles)
+        {
+            uint32_t qidx = tctx->actx->qid2idx[conn->qid];
+            char *umem_area = tctx->txrx_xsk_info[qidx]->umem_area;
+            struct xsk_ring_prod *tx = &tctx->txrx_xsk_info[qidx]->tx;
+            struct thread_bcache *bc = &tctx->iobuffer;
+            unsigned int idx_tx = 0;
+            if (thread_bcache_check(bc, 1) < 1 || xsk_ring_prod__reserve(tx, 1, &idx_tx) < 1)
+                break;
+            uint64_t buffer_addr = add_offset_tx_frame(thread_bcache_cons(bc));
+            char *pkt = reinterpret_cast<char *>(xsk_umem__get_data(umem_area, buffer_addr));
+            struct iphdr *iph = reinterpret_cast<struct iphdr *>(pkt + sizeof(struct ethhdr));
+            struct tcphdr *tcph = reinterpret_cast<struct tcphdr *>(pkt + sizeof(struct ethhdr) + sizeof(struct iphdr));
+            iph->saddr = htonl(conn->local_ip);
+            iph->daddr = htonl(conn->remote_ip);
+            iph->protocol = IPPROTO_TCP;
+            tcph->source = htons(conn->local_port);
+            tcph->dest = htons(conn->remote_port);
+            tcp_txmeta_clear_all(umem_area, buffer_addr);
+            /* no rx_bump: the RESYNC answer skips the window update logic */
+            tcp_txmeta_flag(umem_area, buffer_addr, FLAG_SYNC | FLAG_RESYNC);
+            tcp_txmeta_rxbump(umem_area, buffer_addr, 0);
+            struct xdp_desc *desc = xsk_ring_prod__tx_desc(tx, idx_tx);
+            desc->addr = buffer_addr;
+            desc->len = sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE;
+            desc->options = 0;
+            xsk_ring_prod__submit(tx, 1);
+            tctx->txrx_xsk_info[qidx]->outstanding++;
+            kick_tx(tctx->txrx_xsk_fd[qidx], tx);
+            conn->progress_tsc = now;
+        }
+        it++;
+    }
 }
 
 /**
@@ -1046,12 +1218,25 @@ static inline void tcp_retransmission(struct app_ctx_per_thread *tctx)
         struct eTrantcp_connection *conn = it->first;
         uint32_t len = it->second;
 
-        if (!conn->unack_tx_addrs.empty()) 
-            eTran_tcp_tx_submit_zc_retransmission(tctx, conn, len);
+        (void)len;
+        /* resend everything rewound (txb_allocated only holds rewound bytes:
+         * conn_send() reserves and submits at once, and reserves nothing while
+         * a resend is pending). Keep the connection queued until done: dropping
+         * it after one partial attempt left rewound bytes unsent forever */
+        if (conn->txb_allocated && !conn->unack_tx_addrs.empty())
+            eTran_tcp_tx_submit_zc_retransmission(tctx, conn, conn->txb_allocated);
+        else if (conn->txb_allocated)
+        {
+            static unsigned int dbg = 0;
+            if (dbg++ < 5)
+                fprintf(stderr, "retransmission: %u bytes rewound but no unacked packets (head %u txb_sent %u pending_free %u)\n",
+                        conn->txb_allocated, conn->txb_head, conn->txb_sent, conn->pending_free_bytes);
+        }
 
-        // printf("Retransmitting %u bytes for conn (%p)\n", len, conn);
-
-        it = tctx->retransmission_conns.erase(it);
+        if (conn->txb_allocated && conn->status == CONN_OPEN)
+            it++;
+        else
+            it = tctx->retransmission_conns.erase(it);
     }
 }
 
@@ -1064,8 +1249,9 @@ static inline void tcp_free_buffers(struct app_ctx_per_thread *tctx)
         struct eTrantcp_connection *conn = *it;
         // only free whole packets: an ACK can end in the middle of a packet
         while (!conn->unack_tx_addrs.empty() &&
-               conn->unack_tx_addrs.front().second <= conn->pending_free_bytes) {
-            auto [addr, plen] = conn->unack_tx_addrs.front();
+               conn->unack_tx_addrs.front().plen <= conn->pending_free_bytes) {
+            uint64_t addr = conn->unack_tx_addrs.front().addr;
+            uint32_t plen = conn->unack_tx_addrs.front().plen;
             conn->unack_tx_addrs.pop_front();
             thread_bcache_prod(bc, addr);
             conn->pending_free_bytes -= plen;
@@ -1118,6 +1304,8 @@ int eTran_tcp_poll_events(struct app_ctx_per_thread *tctx, struct eTrantcp_event
     tcp_free_buffers(tctx);
     
     tcp_retransmission(tctx);
+
+    tcp_lib_rto(tctx);
 
     return nr_event;
 }
