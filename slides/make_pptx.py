@@ -350,19 +350,13 @@ for i, row in enumerate(rows):
 text(s, 80, 490, 1120, 60, "Os casos inviáveis falham como esperado: não há banda para os dois prazos. A ainda tem prioridade quando B tem folga para ceder.", 19, "ink2")
 footer(s, 7, "10 execuções cada · 100 MB por fluxo")
 
-# ---------------- 8. Related work ----------------
+# ---------------- 8. Related work: D2TCP ----------------
 s = new_slide()
-header(s, "Trabalhos relacionados", "Transporte com deadline já foi estudado; a diferença está em onde se decide")
-rows = [["Trabalho", "Quem decide", "O que controla", "Muda switch?", "Relação com o nosso"],
-        [("D³", "SIGCOMM 2011"), "Switches", "Taxa reservada = bytes ÷ tempo restante", "Sim", "Mesma fórmula do R_required"],
-        [("D²TCP", "SIGCOMM 2012"), "Host", "Janela do DCTCP, ajustada pela urgência", "Não", "O mais parecido: flows com folga cedem"],
-        [("PDQ", "SIGCOMM 2012"), "Switches", "Preempção: deadline mais cedo primeiro", "Sim", "Prioridade forte, mas precisa de switch novo"],
-        [("pFabric", "SIGCOMM 2013"), "Switches", "Prioridade em cada pacote", "Sim", "Idem"],
-        [("Karuna", "SIGCOMM 2016"), "Host", "Taxa mínima para flows com deadline", "Não", "Trata flows sem deadline (nossa limitação)"],
-        [("DeadlineTCP", "este trabalho"), "Host", "Pacing rate no fast path eBPF", "Não", "Roda no eTran (AF_XDP / eBPF)"]]
-widths = [190, 140, 330, 130, 330]
-rh = 62
-tshape = s.shapes.add_table(len(rows), len(widths), E(80), E(178), E(sum(widths)), E(rh * len(rows)))
+header(s, "Trabalho relacionado", "D²TCP: a mesma ideia, aplicada na janela do TCP")
+text(s, 80, 140, 1120, 28, [[("Vamanan, Hasan e Vijaykumar. ", {}), ("Deadline-Aware Datacenter TCP.", {"color": "ink"}), (" SIGCOMM 2012.", {})]], 19, "ink2")
+rows = [["", "D²TCP", "DeadlineTCP"]] + [['Medida de urgência', 'd = tempo necessário ÷ tempo restante', 'urgência = tempo restante ÷ tempo necessário (= 1/d)'], ['Como reage', 'Na janela: ao receber ECN, reduz W × (1 − α^d/2)', 'No pacing rate: modo urgente, moderado ou normal'], ['Flow com folga', 'Cede só quando há congestionamento (marcação ECN)', 'Cede sempre: envia só o rate que o deadline exige'], ['Sinal de congestionamento', 'ECN nos switches (DCTCP)', 'RTT (TIMELY), sem ECN'], ['Onde roda', 'TCP do kernel Linux', 'Fast path eBPF do eTran (AF_XDP)']]
+widths = [250, 435, 435]
+tshape = s.shapes.add_table(len(rows), 3, E(80), E(190), E(sum(widths)), E(44 + 76 * (len(rows) - 1)))
 tbl = tshape.table
 tblPr = tshape._element.graphic.graphicData.tbl.tblPr
 for attr in ("bandRow", "firstRow"):
@@ -373,31 +367,21 @@ if st is not None:
 for j, wd in enumerate(widths):
     tbl.columns[j].width = E(wd)
 for i, row in enumerate(rows):
-    tbl.rows[i].height = E(44 if i == 0 else rh)
+    tbl.rows[i].height = E(44 if i == 0 else 76)
     for j, val in enumerate(row):
         cell = tbl.cell(i, j)
         cell.fill.solid()
-        cell.fill.fore_color.rgb = rgb(C["asoft"] if i == len(rows) - 1 else C["white"])
+        cell.fill.fore_color.rgb = rgb(C["asoft"] if j == 2 else C["white"])
         cell.vertical_anchor = MSO_ANCHOR.MIDDLE
-        cell.margin_left = cell.margin_right = E(12)
+        cell.margin_left = cell.margin_right = E(14)
         tf = cell.text_frame; tf.text = ""; tf.word_wrap = True
-        p0 = tf.paragraphs[0]
+        r = tf.paragraphs[0].add_run(); r.text = val
         if i == 0:
-            r = p0.add_run(); r.text = val
-            r.font.name, r.font.size, r.font.color.rgb = MONO, Pt(13 * 0.75), rgb(C["ink3"])
-        elif j == 0:
-            name, venue = val
-            r = p0.add_run(); r.text = name
             r.font.name, r.font.size, r.font.bold, r.font.color.rgb = SANS, Pt(18 * 0.75), True, rgb(C["ink"])
-            p1 = tf.add_paragraph(); r = p1.add_run(); r.text = venue
-            r.font.name, r.font.size, r.font.color.rgb = MONO, Pt(12.5 * 0.75), rgb(C["ink3"])
         else:
-            r = p0.add_run(); r.text = val
-            r.font.name, r.font.size = SANS, Pt(17 * 0.75)
-            col = "ink"
-            if j == 3:
-                col = "bad" if val == "Sim" else "good"; r.font.bold = True
-            r.font.color.rgb = rgb(C[col])
+            r.font.name, r.font.size = SANS, Pt(18 * 0.75)
+            r.font.bold = j == 0
+            r.font.color.rgb = rgb(C["ink"] if j == 0 else C["ink2"])
         tcPr = cell._tc.get_or_add_tcPr()
         for side in ("a:lnL", "a:lnR", "a:lnT", "a:lnB"):
             ln = etree.SubElement(tcPr, qn(side))
@@ -409,7 +393,7 @@ for i, row in enumerate(rows):
         fill = tcPr.find(qn("a:solidFill"))
         if fill is not None:
             tcPr.remove(fill); tcPr.append(fill)
-footer(s, 8, "Base: eTran (NSDI 2025) · Carousel (SIGCOMM 2017) · TIMELY (SIGCOMM 2015) · DCTCP (SIGCOMM 2010)")
+footer(s, 8, "Mesma noção de urgência; o DeadlineTCP cede banda antes de haver congestionamento")
 
 # ---------------- 9. Takeaways ----------------
 s = new_slide()

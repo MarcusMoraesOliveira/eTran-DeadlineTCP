@@ -90,6 +90,9 @@ p, li { font-size: 22px; line-height: 1.45; color: var(--ink-2); margin: 0; }
 
 table.rel td { font-size: 17px; padding: 9px 12px; line-height: 1.3; }
 table.rel th { padding: 8px 12px; }
+table.d2 td { font-size: 18px; padding: 13px 14px; }
+table.d2 td:first-child { width: 230px; }
+table.d2 th:last-child, table.d2 td:last-child { background: var(--a-soft); }
 table.rel .ven { font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); }
 /* setup slide */
 .crit-wrap { display: flex; flex-direction: column; gap: 12px; }
@@ -372,18 +375,14 @@ table.t tr.win td { background: var(--a-soft); }
 
 <!-- 7b Related work -->
 <section class="slide">
-  <p class="kicker">Trabalhos relacionados</p>
-  <h2>Transporte com deadline já foi estudado; a diferença está em onde se decide</h2>
-  <table class="t rel">
-    <tr><th>Trabalho</th><th>Quem decide</th><th>O que controla</th><th>Muda switch?</th><th>Relação com o nosso</th></tr>
-    <tr><td><b>D³</b><br><span class="ven">SIGCOMM 2011</span></td><td>Switches</td><td>Taxa reservada = bytes ÷ tempo restante</td><td class="no">Sim</td><td>Mesma fórmula do R_required</td></tr>
-    <tr><td><b>D²TCP</b><br><span class="ven">SIGCOMM 2012</span></td><td>Host</td><td>Janela do DCTCP, ajustada pela urgência</td><td class="ok">Não</td><td>O mais parecido: flows com folga cedem</td></tr>
-    <tr><td><b>PDQ</b><br><span class="ven">SIGCOMM 2012</span></td><td>Switches</td><td>Preempção: deadline mais cedo primeiro</td><td class="no">Sim</td><td>Prioridade forte, mas precisa de switch novo</td></tr>
-    <tr><td><b>pFabric</b><br><span class="ven">SIGCOMM 2013</span></td><td>Switches</td><td>Prioridade em cada pacote</td><td class="no">Sim</td><td>Idem</td></tr>
-    <tr><td><b>Karuna</b><br><span class="ven">SIGCOMM 2016</span></td><td>Host</td><td>Taxa mínima para flows com deadline</td><td class="ok">Não</td><td>Trata flows sem deadline (nossa limitação)</td></tr>
-    <tr class="win"><td><b>DeadlineTCP</b><br><span class="ven">este trabalho</span></td><td>Host</td><td>Pacing rate no fast path eBPF</td><td class="ok">Não</td><td>Roda no eTran (AF_XDP / eBPF)</td></tr>
+  <p class="kicker">Trabalho relacionado</p>
+  <h2>D²TCP: a mesma ideia, aplicada na janela do TCP</h2>
+  <p style="font-size:19px;margin-top:-8px;">Vamanan, Hasan e Vijaykumar. <i>Deadline-Aware Datacenter TCP.</i> SIGCOMM 2012.</p>
+  <table class="t rel d2">
+    <tr><th></th><th>D²TCP</th><th>DeadlineTCP</th></tr>
+    <tr><td><b>Medida de urgência</b></td><td>d = tempo necessário ÷ tempo restante</td><td>urgência = tempo restante ÷ tempo necessário (= 1/d)</td></tr><tr><td><b>Como reage</b></td><td>Na janela: ao receber ECN, reduz W × (1 − α<sup>d</sup>/2)</td><td>No pacing rate: modo urgente, moderado ou normal</td></tr><tr><td><b>Flow com folga</b></td><td>Cede só quando há congestionamento (marcação ECN)</td><td>Cede sempre: envia só o rate que o deadline exige</td></tr><tr><td><b>Sinal de congestionamento</b></td><td>ECN nos switches (DCTCP)</td><td>RTT (TIMELY), sem ECN</td></tr><tr><td><b>Onde roda</b></td><td>TCP do kernel Linux</td><td>Fast path eBPF do eTran (AF_XDP)</td></tr>
   </table>
-  <div class="foot"><span>Base: eTran (NSDI 2025) · Carousel (SIGCOMM 2017) · TIMELY (SIGCOMM 2015) · DCTCP (SIGCOMM 2010)</span><span class="pg"></span></div>
+  <div class="foot"><span>Mesma noção de urgência; o DeadlineTCP cede banda antes de haver congestionamento</span><span class="pg"></span></div>
 </section>
 
 <!-- 7 Limits -->
