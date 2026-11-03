@@ -16,7 +16,7 @@ SANS, MONO = "Calibri", "Consolas"
 C = dict(ink="12161C", ink2="4C5563", ink3="7C8594", rule="E2E5EA", box="D5D9E0", soft="F2F4F7",
          a="2A78D6", asoft="E6F0FB", aline="9CC0EC", b="EB6834", bsoft="FDEEE7", good="1F7A3F",
          bad="B3261E", white="FFFFFF", slot="E6E9EE", grid="ECEEF2")
-TOTAL = 8
+TOTAL = 9
 ox, oy = 0, 0  # origin of the current figure (set per slide)
 
 
@@ -350,7 +350,68 @@ for i, row in enumerate(rows):
 text(s, 80, 490, 1120, 60, "Os casos inviáveis falham como esperado: não há banda para os dois prazos. A ainda tem prioridade quando B tem folga para ceder.", 19, "ink2")
 footer(s, 7, "10 execuções cada · 100 MB por fluxo")
 
-# ---------------- 8. Takeaways ----------------
+# ---------------- 8. Related work ----------------
+s = new_slide()
+header(s, "Trabalhos relacionados", "Transporte com deadline já foi estudado; a diferença está em onde se decide")
+rows = [["Trabalho", "Quem decide", "O que controla", "Muda switch?", "Relação com o nosso"],
+        [("D³", "SIGCOMM 2011"), "Switches", "Taxa reservada = bytes ÷ tempo restante", "Sim", "Mesma fórmula do R_required"],
+        [("D²TCP", "SIGCOMM 2012"), "Host", "Janela do DCTCP, ajustada pela urgência", "Não", "O mais parecido: flows com folga cedem"],
+        [("PDQ", "SIGCOMM 2012"), "Switches", "Preempção: deadline mais cedo primeiro", "Sim", "Prioridade forte, mas precisa de switch novo"],
+        [("pFabric", "SIGCOMM 2013"), "Switches", "Prioridade em cada pacote", "Sim", "Idem"],
+        [("Karuna", "SIGCOMM 2016"), "Host", "Taxa mínima para flows com deadline", "Não", "Trata flows sem deadline (nossa limitação)"],
+        [("DeadlineTCP", "este trabalho"), "Host", "Pacing rate no fast path eBPF", "Não", "Roda no eTran (AF_XDP / eBPF)"]]
+widths = [190, 140, 330, 130, 330]
+rh = 62
+tshape = s.shapes.add_table(len(rows), len(widths), E(80), E(178), E(sum(widths)), E(rh * len(rows)))
+tbl = tshape.table
+tblPr = tshape._element.graphic.graphicData.tbl.tblPr
+for attr in ("bandRow", "firstRow"):
+    tblPr.set(attr, "0")
+st = tblPr.find(qn("a:tableStyleId"))
+if st is not None:
+    st.text = "{2D5ABB26-0587-4C30-8999-92F81FD0307C}"
+for j, wd in enumerate(widths):
+    tbl.columns[j].width = E(wd)
+for i, row in enumerate(rows):
+    tbl.rows[i].height = E(44 if i == 0 else rh)
+    for j, val in enumerate(row):
+        cell = tbl.cell(i, j)
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = rgb(C["asoft"] if i == len(rows) - 1 else C["white"])
+        cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+        cell.margin_left = cell.margin_right = E(12)
+        tf = cell.text_frame; tf.text = ""; tf.word_wrap = True
+        p0 = tf.paragraphs[0]
+        if i == 0:
+            r = p0.add_run(); r.text = val
+            r.font.name, r.font.size, r.font.color.rgb = MONO, Pt(13 * 0.75), rgb(C["ink3"])
+        elif j == 0:
+            name, venue = val
+            r = p0.add_run(); r.text = name
+            r.font.name, r.font.size, r.font.bold, r.font.color.rgb = SANS, Pt(18 * 0.75), True, rgb(C["ink"])
+            p1 = tf.add_paragraph(); r = p1.add_run(); r.text = venue
+            r.font.name, r.font.size, r.font.color.rgb = MONO, Pt(12.5 * 0.75), rgb(C["ink3"])
+        else:
+            r = p0.add_run(); r.text = val
+            r.font.name, r.font.size = SANS, Pt(17 * 0.75)
+            col = "ink"
+            if j == 3:
+                col = "bad" if val == "Sim" else "good"; r.font.bold = True
+            r.font.color.rgb = rgb(C[col])
+        tcPr = cell._tc.get_or_add_tcPr()
+        for side in ("a:lnL", "a:lnR", "a:lnT", "a:lnB"):
+            ln = etree.SubElement(tcPr, qn(side))
+            if side == "a:lnB":
+                ln.set("w", str(9525))
+                sf = etree.SubElement(ln, qn("a:solidFill")); c_ = etree.SubElement(sf, qn("a:srgbClr")); c_.set("val", C["rule"])
+            else:
+                ln.set("w", "0"); etree.SubElement(ln, qn("a:noFill"))
+        fill = tcPr.find(qn("a:solidFill"))
+        if fill is not None:
+            tcPr.remove(fill); tcPr.append(fill)
+footer(s, 8, "Base: eTran (NSDI 2025) · Carousel (SIGCOMM 2017) · TIMELY (SIGCOMM 2015) · DCTCP (SIGCOMM 2010)")
+
+# ---------------- 9. Takeaways ----------------
 s = new_slide()
 header(s, "Conclusões", "A Fase 5 funciona para prazos viáveis; restam algumas limitações")
 cols = [("O que funciona", ["Um fluxo com folga cede banda a um mais urgente",
@@ -363,7 +424,7 @@ for i, (h, items) in enumerate(cols):
     x = 80 + i * 584
     text(s, x, 220, 536, 32, h, 22, "ink", True)
     text(s, x, 266, 536, 360, [[("•  ", {"color": "ink3"}), (t, {})] for t in items], 20, "ink2", lsp=1.25)
-footer(s, 8, "DeadlineTCP")
+footer(s, 9, "DeadlineTCP")
 
 out = "/users/marcusVM/eTran-DeadlineTCP/slides/DeadlineTCP_Fase5.pptx"
 import os
